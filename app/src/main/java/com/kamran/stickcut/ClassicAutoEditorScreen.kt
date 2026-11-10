@@ -92,6 +92,34 @@ private fun naturalCompare(a: String, b: String): Int {
     return partsA.size.compareTo(partsB.size)
 }
 
+// Finds the sequence number in a file name like "image 1", "image10", "122_abc".
+// Returns null when the name has no clear single number.
+private fun sequenceNumber(fileName: String): Long? {
+    val base = fileName.substringBeforeLast('.')
+    val leading = Regex("^\\s*(\\d+)").find(base)
+    if (leading != null) {
+        return leading.groupValues[1].toLongOrNull()
+    }
+    val groups = Regex("\\d+").findAll(base).toList()
+    if (groups.size == 1) {
+        return groups[0].value.toLongOrNull()
+    }
+    return null
+}
+
+private fun compareImageNames(a: String, b: String): Int {
+    val numberA = sequenceNumber(a)
+    val numberB = sequenceNumber(b)
+    return when {
+        numberA != null && numberB != null -> {
+            if (numberA != numberB) numberA.compareTo(numberB) else naturalCompare(a, b)
+        }
+        numberA != null -> -1
+        numberB != null -> 1
+        else -> naturalCompare(a, b)
+    }
+}
+
 @Composable
 fun ClassicAutoEditorScreen(onBack: () -> Unit) {
     val context = LocalContext.current
@@ -116,7 +144,7 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                 .filter { it !in existing }
                 .map { ImportedImage(it, queryDisplayName(context, it)) }
             images = (images + added).sortedWith(
-                Comparator { a, b -> naturalCompare(a.name, b.name) }
+                Comparator { a, b -> compareImageNames(a.name, b.name) }
             )
         }
     }
@@ -130,7 +158,7 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 90.dp)
+                .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 130.dp)
         ) {
             ClassicTopBar(title = "Classic AutoEditor", onBack = onBack)
             Spacer(modifier = Modifier.height(16.dp))
