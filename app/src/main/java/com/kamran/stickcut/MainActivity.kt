@@ -2,6 +2,7 @@ package com.kamran.stickcut
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -36,6 +37,12 @@ import kotlinx.coroutines.delay
 private val Navy = Color(0xFF050B1F)
 private val ElectricBlue = Color(0xFF2D8CFF)
 
+enum class Screen {
+    Splash,
+    Home,
+    Classic
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,12 +54,16 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun StickCutApp() {
-    var showSplash by remember { mutableStateOf(true) }
+    var screen by remember { mutableStateOf(Screen.Splash) }
 
-    if (showSplash) {
-        SplashScreen(onFinished = { showSplash = false })
-    } else {
-        HomeScreen()
+    BackHandler(enabled = screen == Screen.Classic) {
+        screen = Screen.Home
+    }
+
+    when (screen) {
+        Screen.Splash -> SplashScreen(onFinished = { screen = Screen.Home })
+        Screen.Home -> HomeScreen(onOpenClassic = { screen = Screen.Classic })
+        Screen.Classic -> ClassicAutoEditorScreen(onBack = { screen = Screen.Home })
     }
 }
 
