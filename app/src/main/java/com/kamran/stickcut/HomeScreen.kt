@@ -37,7 +37,9 @@ private val HomeBlue = Color(0xFF2D8CFF)
 private val GlowBorder = Color(0xFF3FA2FF)
 
 @Composable
-fun HomeScreen() {
+fun HomeScreen(
+    onOpenClassic: () -> Unit = {}
+) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -61,7 +63,8 @@ fun HomeScreen() {
                     title = "Classic\nAutoEditor",
                     subtitle = "Simple & Fast",
                     modifier = Modifier.weight(1f),
-                    cardHeight = 150
+                    cardHeight = 150,
+                    onClick = onOpenClassic
                 )
                 DashCard(
                     icon = "🎞",
