@@ -2,6 +2,8 @@ package com.kamran.stickcut
 
 import android.content.Context
 import android.content.Intent
+import android.media.MediaMetadataRetriever
+import android.media.MediaPlayer
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.BackHandler
@@ -31,9 +33,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +53,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private val ClassicNavy = Color(0xFF050B1F)
 private val ClassicBlue = Color(0xFF2D8CFF)
@@ -58,6 +65,8 @@ private val WarnColor = Color(0xFFFFC857)
 private val OkColor = Color(0xFF6BE3A0)
 
 data class ImportedImage(val uri: Uri, val name: String)
+
+data class ImportedAudio(val uri: Uri, val name: String, val durationMs: Long)
 
 private fun queryDisplayName(context: Context, uri: Uri): String {
     context.contentResolver.query(
@@ -75,7 +84,31 @@ private fun queryDisplayName(context: Context, uri: Uri): String {
             }
         }
     }
-    return uri.lastPathSegment ?: "image"
+    return uri.lastPathSegment ?: "file"
+}
+
+private fun readAudioDurationMs(context: Context, uri: Uri): Long? {
+    val retriever = MediaMetadataRetriever()
+    return try {
+        retriever.setDataSource(context, uri)
+        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+    } catch (e: Exception) {
+        null
+    } finally {
+        try {
+            retriever.release()
+        } catch (e: Exception) {
+            // ignore
+        }
+    }
+}
+
+private fun formatDuration(ms: Long): String {
+    val totalSeconds = ms / 1000
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    val tenth = (ms % 1000) / 100
+    return "$minutes:${seconds.toString().padStart(2, '0')}.$tenth"
 }
 
 private fun splitParts(text: String): List<String> {
@@ -190,8 +223,65 @@ private fun buildReport(images: List<ImportedImage>): SortReport {
 @Composable
 fun ClassicAutoEditorScreen(onBack: () -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
     var images by remember { mutableStateOf<List<ImportedImage>>(emptyList()) }
     var showOrderList by remember { mutableStateOf(false) }
+
+    var audio by remember { mutableStateOf<ImportedAudio?>(null) }
+    var audioLoading by remember { mutableStateOf(false) }
+    var audioError by remember { mutableStateOf<String?>(null) }
+    var player by remember { mutableStateOf<MediaPlayer?>(null) }
+    var isPlaying by remember { mutableStateOf(false) }
+
+    fun releasePlayer() {
+        try {
+            player?.release()
+        } catch (e: Exception) {
+            // ignore
+        }
+        player = null
+        isPlaying = false
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                player?.release()
+            } catch (e: Exception) {
+                // ignore
+            }
+        }
+    }
+
+    fun togglePlay(current: ImportedAudio) {
+        try {
+            if (isPlaying) {
+                player?.pause()
+                isPlaying = false
+            } else {
+                val existing = player
+                val p = if (existing != null) {
+                    existing
+                } else {
+                    val created = MediaPlayer()
+                    created.setDataSource(context, current.uri)
+                    created.setOnCompletionListener { mp ->
+                        isPlaying = false
+                        mp.seekTo(0)
+                    }
+                    created.prepare()
+                    created
+                }
+                player = p
+                p.start()
+                isPlaying = true
+            }
+        } catch (e: Exception) {
+            releasePlayer()
+            audioError = "This audio could not be played on this phone."
+        }
+    }
 
     val imagePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -212,6 +302,35 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                 .filter { it !in existing }
                 .map { ImportedImage(it, queryDisplayName(context, it)) }
             images = sortImages(images + added)
+        }
+    }
+
+    val audioPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (e: Exception) {
+                // ignore
+            }
+            releasePlayer()
+            audioError = null
+            audioLoading = true
+            scope.launch {
+                val name = withContext(Dispatchers.IO) { queryDisplayName(context, uri) }
+                val duration = withContext(Dispatchers.IO) { readAudioDurationMs(context, uri) }
+                audioLoading = false
+                if (duration == null || duration <= 0L) {
+                    audio = null
+                    audioError = "\"$name\" could not be read as audio. Try another file or format."
+                } else {
+                    audio = ImportedAudio(uri, name, duration)
+                }
+            }
         }
     }
 
@@ -244,7 +363,7 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text(
-                    text = "Build: Step 23",
+                    text = "Build: Step 25",
                     color = Color(0xFF6C85B8),
                     fontSize = 11.sp,
                     textAlign = TextAlign.Center,
@@ -335,7 +454,46 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                     onClick = { imagePicker.launch(arrayOf("image/*")) }
                 )
                 Spacer(modifier = Modifier.height(10.dp))
-                ImportRow(icon = "🎙", label = "Import Voiceover")
+                ImportRow(
+                    icon = "🎙",
+                    label = if (audio == null) "Import Voiceover" else "Replace Voiceover",
+                    onClick = { audioPicker.launch(arrayOf("audio/*", "application/ogg")) }
+                )
+
+                if (audioLoading) {
+                    Text(
+                        text = "Reading audio...",
+                        color = Color(0xFFB8D4FF),
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+
+                val currentAudio = audio
+                if (currentAudio != null) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    AudioCard(
+                        audio = currentAudio,
+                        isPlaying = isPlaying,
+                        onTogglePlay = { togglePlay(currentAudio) },
+                        onRemove = {
+                            releasePlayer()
+                            audio = null
+                            audioError = null
+                        }
+                    )
+                }
+
+                val errorText = audioError
+                if (errorText != null) {
+                    Text(
+                        text = errorText,
+                        color = WarnColor,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+
                 Spacer(modifier = Modifier.height(10.dp))
                 ImportRow(icon = "📄", label = "Optional Script")
                 Spacer(modifier = Modifier.height(24.dp))
@@ -359,6 +517,52 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
             }
 
             CreatorBrand(modifier = Modifier.align(Alignment.BottomCenter))
+        }
+    }
+}
+
+@Composable
+private fun AudioCard(
+    audio: ImportedAudio,
+    isPlaying: Boolean,
+    onTogglePlay: () -> Unit,
+    onRemove: () -> Unit
+) {
+    val shape = RoundedCornerShape(14.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(ClassicCardDark)
+            .border(1.dp, OkColor.copy(alpha = 0.6f), shape)
+            .padding(12.dp)
+    ) {
+        Text(
+            text = audio.name,
+            color = Color.White,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            text = "Total length: ${formatDuration(audio.durationMs)}  (${audio.durationMs} ms)",
+            color = OkColor,
+            fontSize = 13.sp,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            SmallButton(
+                text = if (isPlaying) "Pause" else "Play test",
+                modifier = Modifier.weight(1f),
+                onClick = onTogglePlay
+            )
+            SmallButton(
+                text = "Remove",
+                modifier = Modifier.weight(1f),
+                onClick = onRemove
+            )
         }
     }
 }
