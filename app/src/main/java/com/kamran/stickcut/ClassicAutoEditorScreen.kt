@@ -1,8 +1,10 @@
 package com.kamran.stickcut
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -11,6 +13,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,8 +21,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -38,6 +44,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
@@ -47,10 +54,12 @@ private val ClassicNavy = Color(0xFF050B1F)
 private val ClassicBlue = Color(0xFF2D8CFF)
 private val ClassicCard = Color(0xFF0F2F70)
 private val ClassicCardDark = Color(0xFF0A1A44)
+private val WarnColor = Color(0xFFFFC857)
+private val OkColor = Color(0xFF6BE3A0)
 
 data class ImportedImage(val uri: Uri, val name: String)
 
-private fun queryDisplayName(context: android.content.Context, uri: Uri): String {
+private fun queryDisplayName(context: Context, uri: Uri): String {
     context.contentResolver.query(
         uri,
         arrayOf(OpenableColumns.DISPLAY_NAME),
@@ -92,15 +101,28 @@ private fun naturalCompare(a: String, b: String): Int {
     return partsA.size.compareTo(partsB.size)
 }
 
-// Finds the sequence number in a file name like "image 1", "image10", "122_abc".
-// Returns null when the name has no clear single number.
+private val keywordNumberRegex =
+    Regex("(?i)(?:image|img|scene|slide|pic|photo|frame|shot|page|part)[\\s_.\\-]*(\\d+)")
+private val copyMarkerRegex = Regex("\\s*\\(\\d+\\)\\s*$")
+private val leadingNumberRegex = Regex("^\\s*(\\d+)")
+private val anyNumberRegex = Regex("\\d+")
+
+// Finds the sequence number in names like "image 1", "image10", "122_abc".
+// Returns null when no clear number can be found. It never guesses.
 private fun sequenceNumber(fileName: String): Long? {
-    val base = fileName.substringBeforeLast('.')
-    val leading = Regex("^\\s*(\\d+)").find(base)
-    if (leading != null) {
-        return leading.groupValues[1].toLongOrNull()
+    val base = fileName.substringBeforeLast('.').replace(copyMarkerRegex, "")
+
+    val keywordMatch = keywordNumberRegex.find(base)
+    if (keywordMatch != null) {
+        return keywordMatch.groupValues[1].toLongOrNull()
     }
-    val groups = Regex("\\d+").findAll(base).toList()
+
+    val leadingMatch = leadingNumberRegex.find(base)
+    if (leadingMatch != null) {
+        return leadingMatch.groupValues[1].toLongOrNull()
+    }
+
+    val groups = anyNumberRegex.findAll(base).toList()
     if (groups.size == 1) {
         return groups[0].value.toLongOrNull()
     }
@@ -120,10 +142,56 @@ private fun compareImageNames(a: String, b: String): Int {
     }
 }
 
+private fun sortImages(list: List<ImportedImage>): List<ImportedImage> {
+    return list.sortedWith(Comparator { a, b -> compareImageNames(a.name, b.name) })
+}
+
+private data class SortReport(
+    val total: Int,
+    val numbered: Int,
+    val unnumbered: Int,
+    val duplicates: List<Long>,
+    val missing: List<Long>,
+    val missingTotal: Int
+)
+
+private fun buildReport(images: List<ImportedImage>): SortReport {
+    val numbers = images.mapNotNull { sequenceNumber(it.name) }
+    val duplicates = numbers.groupingBy { it }.eachCount()
+        .filter { it.value > 1 }.keys.sorted()
+
+    val missing = mutableListOf<Long>()
+    var missingTotal = 0
+    if (numbers.isNotEmpty()) {
+        val lowest = numbers.min()
+        val highest = numbers.max()
+        if (highest - lowest <= 5000L) {
+            val present = numbers.toSet()
+            var n = lowest
+            while (n <= highest) {
+                if (n !in present) {
+                    missingTotal++
+                    if (missing.size < 8) missing.add(n)
+                }
+                n++
+            }
+        }
+    }
+    return SortReport(
+        total = images.size,
+        numbered = numbers.size,
+        unnumbered = images.size - numbers.size,
+        duplicates = duplicates,
+        missing = missing,
+        missingTotal = missingTotal
+    )
+}
+
 @Composable
 fun ClassicAutoEditorScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     var images by remember { mutableStateOf<List<ImportedImage>>(emptyList()) }
+    var showOrderList by remember { mutableStateOf(false) }
 
     val imagePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -143,10 +211,259 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
             val added = uris
                 .filter { it !in existing }
                 .map { ImportedImage(it, queryDisplayName(context, it)) }
-            images = (images + added).sortedWith(
-                Comparator { a, b -> compareImageNames(a.name, b.name) }
+            images = sortImages(images + added)
+        }
+    }
+
+    if (showOrderList) {
+        ImageOrderList(
+            images = images,
+            onImagesChange = { images = it },
+            onClose = { showOrderList = false }
+        )
+    } else {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(ClassicNavy)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 130.dp)
+            ) {
+                ClassicTopBar(title = "Classic AutoEditor", onBack = onBack)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Import your images and voiceover.\nLet StickCut do the magic!",
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    text = "Build: Step 23",
+                    color = Color(0xFF6C85B8),
+                    fontSize = 11.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp)
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+
+                PreviewBox(firstImage = images.firstOrNull())
+                Spacer(modifier = Modifier.height(12.dp))
+
+                if (images.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Imported Images (${images.size})",
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = "Clear",
+                            color = ClassicBlue,
+                            fontSize = 15.sp,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { images = emptyList() }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(images) { image ->
+                            AsyncImage(
+                                model = ImageRequest.Builder(context)
+                                    .data(image.uri)
+                                    .size(300)
+                                    .crossfade(true)
+                                    .build(),
+                                contentDescription = image.name,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(72.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .border(
+                                        1.dp,
+                                        ClassicBlue.copy(alpha = 0.6f),
+                                        RoundedCornerShape(12.dp)
+                                    )
+                            )
+                        }
+                    }
+                    Text(
+                        text = "Order: ${images.first().name} → ${images.last().name}",
+                        color = Color(0xFFB8D4FF),
+                        fontSize = 12.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    SortReportCard(report = buildReport(images))
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        SmallButton(
+                            text = "View / Reorder",
+                            modifier = Modifier.weight(1f),
+                            onClick = { showOrderList = true }
+                        )
+                        SmallButton(
+                            text = "Re-sort",
+                            modifier = Modifier.weight(1f),
+                            onClick = { images = sortImages(images) }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+
+                ImportRow(
+                    icon = "🖼",
+                    label = "Import Images",
+                    onClick = { imagePicker.launch(arrayOf("image/*")) }
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                ImportRow(icon = "🎙", label = "Import Voiceover")
+                Spacer(modifier = Modifier.height(10.dp))
+                ImportRow(icon = "📄", label = "Optional Script")
+                Spacer(modifier = Modifier.height(24.dp))
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(ClassicBlue)
+                        .clickable { },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Start Auto Edit  →",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            CreatorBrand(modifier = Modifier.align(Alignment.BottomCenter))
+        }
+    }
+}
+
+@Composable
+private fun SortReportCard(report: SortReport) {
+    val hasIssue = report.unnumbered > 0 ||
+        report.duplicates.isNotEmpty() ||
+        report.missingTotal > 0
+    val shape = RoundedCornerShape(14.dp)
+    val borderColor = if (hasIssue) WarnColor else ClassicBlue
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(ClassicCardDark)
+            .border(1.dp, borderColor.copy(alpha = 0.7f), shape)
+            .padding(12.dp)
+    ) {
+        Text(
+            text = "Sort check",
+            color = Color.White,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            text = "Numbered: ${report.numbered}  •  No number: ${report.unnumbered}",
+            color = Color(0xFFB8D4FF),
+            fontSize = 13.sp,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+        if (report.duplicates.isNotEmpty()) {
+            Text(
+                text = "Duplicate numbers: ${report.duplicates.take(8).joinToString(", ")}",
+                color = WarnColor,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 4.dp)
             )
         }
+        if (report.missingTotal > 0) {
+            val extra = report.missingTotal - report.missing.size
+            val extraText = if (extra > 0) " (+$extra more)" else ""
+            Text(
+                text = "Missing numbers: ${report.missing.joinToString(", ")}$extraText",
+                color = WarnColor,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+        if (report.unnumbered > 0) {
+            Text(
+                text = "Images with no clear number are placed at the end. Use View / Reorder to fix them by hand.",
+                color = WarnColor,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+        if (!hasIssue && report.numbered > 0) {
+            Text(
+                text = "✓ Sequence is complete",
+                color = OkColor,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SmallButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
+    Box(
+        modifier = modifier
+            .height(44.dp)
+            .clip(shape)
+            .background(ClassicCard)
+            .border(1.dp, ClassicBlue.copy(alpha = 0.7f), shape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = text,
+            color = Color.White,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+@Composable
+private fun ImageOrderList(
+    images: List<ImportedImage>,
+    onImagesChange: (List<ImportedImage>) -> Unit,
+    onClose: () -> Unit
+) {
+    val context = LocalContext.current
+    BackHandler(enabled = true) { onClose() }
+
+    fun move(from: Int, to: Int) {
+        if (to < 0 || to >= images.size) return
+        val mutable = images.toMutableList()
+        val item = mutable.removeAt(from)
+        mutable.add(to, item)
+        onImagesChange(mutable)
     }
 
     Box(
@@ -157,99 +474,125 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 130.dp)
+                .padding(start = 16.dp, end = 16.dp, top = 16.dp)
         ) {
-            ClassicTopBar(title = "Classic AutoEditor", onBack = onBack)
-            Spacer(modifier = Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "←",
+                    color = Color.White,
+                    fontSize = 28.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(onClick = onClose)
+                        .padding(8.dp)
+                )
+                Text(
+                    text = "Image Order (${images.size})",
+                    color = Color.White,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = "Re-sort",
+                    color = ClassicBlue,
+                    fontSize = 16.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onImagesChange(sortImages(images)) }
+                        .padding(8.dp)
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
 
-            Text(
-                text = "Import your images and voiceover.\nLet StickCut do the magic!",
-                color = Color.White,
-                fontSize = 15.sp,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-
-            PreviewBox(firstImage = images.firstOrNull())
-            Spacer(modifier = Modifier.height(12.dp))
-
-            if (images.isNotEmpty()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Imported Images (${images.size})",
-                        color = Color.White,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Text(
-                        text = "Clear",
-                        color = ClassicBlue,
-                        fontSize = 15.sp,
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(bottom = 90.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                itemsIndexed(images, key = { _, item -> item.uri.toString() }) { index, image ->
+                    val shape = RoundedCornerShape(14.dp)
+                    val number = sequenceNumber(image.name)
+                    Row(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable { images = emptyList() }
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    )
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(images) { image ->
+                            .fillMaxWidth()
+                            .clip(shape)
+                            .background(ClassicCardDark)
+                            .border(1.dp, ClassicBlue.copy(alpha = 0.4f), shape)
+                            .padding(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "${index + 1}",
+                            color = ClassicBlue,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.width(36.dp)
+                        )
                         AsyncImage(
                             model = ImageRequest.Builder(context)
                                 .data(image.uri)
-                                .size(300)
-                                .crossfade(true)
+                                .size(200)
                                 .build(),
                             contentDescription = image.name,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
-                                .size(72.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .border(1.dp, ClassicBlue.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                                .size(52.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                        )
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(horizontal = 10.dp)
+                        ) {
+                            Text(
+                                text = image.name,
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = if (number != null) "No. $number" else "no clear number",
+                                color = if (number != null) Color(0xFFB8D4FF) else WarnColor,
+                                fontSize = 11.sp
+                            )
+                        }
+                        Text(
+                            text = "▲",
+                            color = Color.White,
+                            fontSize = 20.sp,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { move(index, index - 1) }
+                                .padding(8.dp)
+                        )
+                        Text(
+                            text = "▼",
+                            color = Color.White,
+                            fontSize = 20.sp,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { move(index, index + 1) }
+                                .padding(8.dp)
+                        )
+                        Text(
+                            text = "✕",
+                            color = WarnColor,
+                            fontSize = 18.sp,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable {
+                                    onImagesChange(images.filterIndexed { i, _ -> i != index })
+                                }
+                                .padding(8.dp)
                         )
                     }
                 }
-                Text(
-                    text = "Order: ${images.first().name} → ${images.last().name}",
-                    color = Color(0xFFB8D4FF),
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 8.dp)
-                )
-            }
-            Spacer(modifier = Modifier.height(16.dp))
-
-            ImportRow(
-                icon = "🖼",
-                label = "Import Images",
-                onClick = { imagePicker.launch(arrayOf("image/*")) }
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            ImportRow(icon = "🎙", label = "Import Voiceover")
-            Spacer(modifier = Modifier.height(10.dp))
-            ImportRow(icon = "📄", label = "Optional Script")
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(54.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(ClassicBlue)
-                    .clickable { },
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "Start Auto Edit  →",
-                    color = Color.White,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
             }
         }
 
