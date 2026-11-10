@@ -52,7 +52,7 @@ fun StickCutApp() {
     if (showSplash) {
         SplashScreen(onFinished = { showSplash = false })
     } else {
-        HomePlaceholder()
+        HomeScreen()
     }
 }
 
@@ -108,35 +108,6 @@ fun SplashScreen(onFinished: () -> Unit) {
                 color = Color.White,
                 fontSize = 14.sp,
                 modifier = Modifier.padding(top = 10.dp)
-            )
-        }
-
-        CreatorBrand(modifier = Modifier.align(Alignment.BottomCenter))
-    }
-}
-
-@Composable
-fun HomePlaceholder() {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Navy)
-    ) {
-        Column(
-            modifier = Modifier.align(Alignment.Center),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                text = "Home Screen",
-                color = ElectricBlue,
-                fontSize = 32.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = "Coming in the next step",
-                color = Color.White,
-                fontSize = 15.sp,
-                modifier = Modifier.padding(top = 8.dp)
             )
         }
 
