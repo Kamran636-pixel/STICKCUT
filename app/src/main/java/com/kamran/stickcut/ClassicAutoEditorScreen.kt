@@ -239,6 +239,10 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
     var playingIndex by remember { mutableStateOf<Int?>(null) }
 
+    var scripts by remember { mutableStateOf<List<LoadedScript>>(emptyList()) }
+    var scriptLoading by remember { mutableStateOf(false) }
+    var scriptError by remember { mutableStateOf<String?>(null) }
+
     fun stopPlayback() {
         try {
             player?.stop()
@@ -358,6 +362,63 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
         }
     }
 
+    val scriptPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            uris.forEach { uri ->
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (e: Exception) {
+                    // ignore
+                }
+            }
+            scriptError = null
+            scriptLoading = true
+            scope.launch {
+                val existing = scripts.map { it.uri }.toSet()
+                val fresh = uris.filter { it !in existing }
+                val loaded = mutableListOf<LoadedScript>()
+                val failed = mutableListOf<String>()
+                withContext(Dispatchers.IO) {
+                    fresh.forEach { uri ->
+                        val name = queryDisplayName(context, uri)
+                        val text = readScriptText(context, uri)
+                        if (text == null) {
+                            failed.add(name)
+                        } else {
+                            loaded.add(loadScript(name, uri, text))
+                        }
+                    }
+                }
+                scripts = (scripts + loaded).sortedWith(
+                    Comparator { a, b -> compareFileNames(a.name, b.name) }
+                )
+                scriptLoading = false
+                scriptError = if (failed.isEmpty()) {
+                    null
+                } else {
+                    "Could not read: ${failed.joinToString(", ")}. Use plain .txt files smaller than 2 MB."
+                }
+            }
+        }
+    }
+
+    val voiceParts = remember(audios) {
+        audios.mapIndexed { index, audio ->
+            VoicePartInfo(index, sequenceNumber(audio.name), audio.name, audio.durationMs)
+        }
+    }
+    val imageNumberSet = remember(images) {
+        images.mapNotNull { sequenceNumber(it.name) }.toSet()
+    }
+    val scriptMatches = remember(scripts, voiceParts, imageNumberSet) {
+        matchScripts(scripts, voiceParts, imageNumberSet)
+    }
+
     if (showOrderList) {
         ImageOrderList(
             images = images,
@@ -387,7 +448,7 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text(
-                    text = "Build: Step 26",
+                    text = "Build: Step 29",
                     color = Color(0xFF6C85B8),
                     fontSize = 11.sp,
                     textAlign = TextAlign.Center,
@@ -532,7 +593,8 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                         onResort = {
                             stopPlayback()
                             audios = sortAudios(audios)
-                        }
+                        },
+                        onAdd = { audioPicker.launch(arrayOf("audio/*", "application/ogg")) }
                     )
 
                     if (audios.size > 1) {
@@ -556,7 +618,46 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                 }
 
                 Spacer(modifier = Modifier.height(10.dp))
-                ImportRow(icon = "📄", label = "Optional Script")
+                ImportRow(
+                    icon = "📄",
+                    label = if (scripts.isEmpty()) "Import Script (.txt)" else "Add More Scripts",
+                    onClick = { scriptPicker.launch(arrayOf("*/*")) }
+                )
+
+                if (scriptLoading) {
+                    Text(
+                        text = "Reading script...",
+                        color = Color(0xFFB8D4FF),
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+
+                if (scripts.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    ScriptPanel(
+                        matches = scriptMatches,
+                        parts = voiceParts,
+                        onRemove = { index ->
+                            scripts = scripts.filterIndexed { i, _ -> i != index }
+                        },
+                        onClear = {
+                            scripts = emptyList()
+                            scriptError = null
+                        }
+                    )
+                }
+
+                val scriptErrorText = scriptError
+                if (scriptErrorText != null) {
+                    Text(
+                        text = scriptErrorText,
+                        color = WarnColor,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+
                 Spacer(modifier = Modifier.height(24.dp))
 
                 Box(
@@ -583,6 +684,37 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
 }
 
 @Composable
+private fun AddMoreTile(label: String, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 8.dp)
+            .clip(shape)
+            .background(ClassicNavy)
+            .border(1.dp, Color.White.copy(alpha = 0.6f), shape)
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "+",
+            color = Color.White,
+            fontSize = 44.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            text = label,
+            color = Color.White,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(start = 10.dp)
+        )
+    }
+}
+
+@Composable
 private fun AudioListCard(
     audios: List<ImportedAudio>,
     playingIndex: Int?,
@@ -592,7 +724,8 @@ private fun AudioListCard(
     onMove: (Int, Int) -> Unit,
     onRemove: (Int) -> Unit,
     onClear: () -> Unit,
-    onResort: () -> Unit
+    onResort: () -> Unit,
+    onAdd: () -> Unit
 ) {
     val shape = RoundedCornerShape(14.dp)
     val total = audios.sumOf { it.durationMs }
@@ -701,6 +834,8 @@ private fun AudioListCard(
                 )
             }
         }
+
+        AddMoreTile(label = "Add next voiceover part", onClick = onAdd)
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             SmallButton(
