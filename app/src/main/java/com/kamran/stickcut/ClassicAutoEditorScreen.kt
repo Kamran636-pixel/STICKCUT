@@ -134,13 +134,14 @@ private fun naturalCompare(a: String, b: String): Int {
     return partsA.size.compareTo(partsB.size)
 }
 
-private val keywordNumberRegex =
-    Regex("(?i)(?:image|img|scene|slide|pic|photo|frame|shot|page|part)[\\s_.\\-]*(\\d+)")
+private val keywordNumberRegex = Regex(
+    "(?i)(?:image|img|scene|slide|pic|photo|frame|shot|page|part|par|audio|voice|track)[\\s_.\\-]*(\\d+)"
+)
 private val copyMarkerRegex = Regex("\\s*\\(\\d+\\)\\s*$")
 private val leadingNumberRegex = Regex("^\\s*(\\d+)")
 private val anyNumberRegex = Regex("\\d+")
 
-// Finds the sequence number in names like "image 1", "image10", "122_abc".
+// Finds the sequence number in names like "image 1", "part2", "122_abc".
 // Returns null when no clear number can be found. It never guesses.
 private fun sequenceNumber(fileName: String): Long? {
     val base = fileName.substringBeforeLast('.').replace(copyMarkerRegex, "")
@@ -162,7 +163,7 @@ private fun sequenceNumber(fileName: String): Long? {
     return null
 }
 
-private fun compareImageNames(a: String, b: String): Int {
+private fun compareFileNames(a: String, b: String): Int {
     val numberA = sequenceNumber(a)
     val numberB = sequenceNumber(b)
     return when {
@@ -176,7 +177,11 @@ private fun compareImageNames(a: String, b: String): Int {
 }
 
 private fun sortImages(list: List<ImportedImage>): List<ImportedImage> {
-    return list.sortedWith(Comparator { a, b -> compareImageNames(a.name, b.name) })
+    return list.sortedWith(Comparator { a, b -> compareFileNames(a.name, b.name) })
+}
+
+private fun sortAudios(list: List<ImportedAudio>): List<ImportedAudio> {
+    return list.sortedWith(Comparator { a, b -> compareFileNames(a.name, b.name) })
 }
 
 private data class SortReport(
@@ -188,8 +193,8 @@ private data class SortReport(
     val missingTotal: Int
 )
 
-private fun buildReport(images: List<ImportedImage>): SortReport {
-    val numbers = images.mapNotNull { sequenceNumber(it.name) }
+private fun buildReport(names: List<String>): SortReport {
+    val numbers = names.mapNotNull { sequenceNumber(it) }
     val duplicates = numbers.groupingBy { it }.eachCount()
         .filter { it.value > 1 }.keys.sorted()
 
@@ -211,9 +216,9 @@ private fun buildReport(images: List<ImportedImage>): SortReport {
         }
     }
     return SortReport(
-        total = images.size,
+        total = names.size,
         numbered = numbers.size,
-        unnumbered = images.size - numbers.size,
+        unnumbered = names.size - numbers.size,
         duplicates = duplicates,
         missing = missing,
         missingTotal = missingTotal
@@ -228,20 +233,53 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
     var images by remember { mutableStateOf<List<ImportedImage>>(emptyList()) }
     var showOrderList by remember { mutableStateOf(false) }
 
-    var audio by remember { mutableStateOf<ImportedAudio?>(null) }
+    var audios by remember { mutableStateOf<List<ImportedAudio>>(emptyList()) }
     var audioLoading by remember { mutableStateOf(false) }
     var audioError by remember { mutableStateOf<String?>(null) }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
-    var isPlaying by remember { mutableStateOf(false) }
+    var playingIndex by remember { mutableStateOf<Int?>(null) }
 
-    fun releasePlayer() {
+    fun stopPlayback() {
+        try {
+            player?.stop()
+        } catch (e: Exception) {
+            // ignore
+        }
         try {
             player?.release()
         } catch (e: Exception) {
             // ignore
         }
         player = null
-        isPlaying = false
+        playingIndex = null
+    }
+
+    fun playFrom(list: List<ImportedAudio>, index: Int, chain: Boolean) {
+        stopPlayback()
+        if (index !in list.indices) return
+        try {
+            val p = MediaPlayer()
+            p.setDataSource(context, list[index].uri)
+            p.setOnCompletionListener { mp ->
+                try {
+                    mp.release()
+                } catch (e: Exception) {
+                    // ignore
+                }
+                player = null
+                playingIndex = null
+                if (chain && index + 1 < list.size) {
+                    playFrom(list, index + 1, true)
+                }
+            }
+            p.prepare()
+            p.start()
+            player = p
+            playingIndex = index
+        } catch (e: Exception) {
+            stopPlayback()
+            audioError = "\"${list[index].name}\" could not be played on this phone."
+        }
     }
 
     DisposableEffect(Unit) {
@@ -251,35 +289,6 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
             } catch (e: Exception) {
                 // ignore
             }
-        }
-    }
-
-    fun togglePlay(current: ImportedAudio) {
-        try {
-            if (isPlaying) {
-                player?.pause()
-                isPlaying = false
-            } else {
-                val existing = player
-                val p = if (existing != null) {
-                    existing
-                } else {
-                    val created = MediaPlayer()
-                    created.setDataSource(context, current.uri)
-                    created.setOnCompletionListener { mp ->
-                        isPlaying = false
-                        mp.seekTo(0)
-                    }
-                    created.prepare()
-                    created
-                }
-                player = p
-                p.start()
-                isPlaying = true
-            }
-        } catch (e: Exception) {
-            releasePlayer()
-            audioError = "This audio could not be played on this phone."
         }
     }
 
@@ -306,29 +315,44 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
     }
 
     val audioPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            try {
-                context.contentResolver.takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            } catch (e: Exception) {
-                // ignore
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            uris.forEach { uri ->
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (e: Exception) {
+                    // ignore
+                }
             }
-            releasePlayer()
+            stopPlayback()
             audioError = null
             audioLoading = true
             scope.launch {
-                val name = withContext(Dispatchers.IO) { queryDisplayName(context, uri) }
-                val duration = withContext(Dispatchers.IO) { readAudioDurationMs(context, uri) }
+                val existing = audios.map { it.uri }.toSet()
+                val fresh = uris.filter { it !in existing }
+                val loaded = mutableListOf<ImportedAudio>()
+                val failed = mutableListOf<String>()
+                withContext(Dispatchers.IO) {
+                    fresh.forEach { uri ->
+                        val name = queryDisplayName(context, uri)
+                        val duration = readAudioDurationMs(context, uri)
+                        if (duration == null || duration <= 0L) {
+                            failed.add(name)
+                        } else {
+                            loaded.add(ImportedAudio(uri, name, duration))
+                        }
+                    }
+                }
+                audios = sortAudios(audios + loaded)
                 audioLoading = false
-                if (duration == null || duration <= 0L) {
-                    audio = null
-                    audioError = "\"$name\" could not be read as audio. Try another file or format."
+                audioError = if (failed.isEmpty()) {
+                    null
                 } else {
-                    audio = ImportedAudio(uri, name, duration)
+                    "Could not read as audio: ${failed.joinToString(", ")}. Try another file or format."
                 }
             }
         }
@@ -363,7 +387,7 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text(
-                    text = "Build: Step 25",
+                    text = "Build: Step 26",
                     color = Color(0xFF6C85B8),
                     fontSize = 11.sp,
                     textAlign = TextAlign.Center,
@@ -430,7 +454,11 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                     )
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    SortReportCard(report = buildReport(images))
+                    SortReportCard(
+                        title = "Sort check (images)",
+                        report = buildReport(images.map { it.name }),
+                        unnumberedHint = "Images with no clear number are placed at the end. Use View / Reorder to fix them by hand."
+                    )
                     Spacer(modifier = Modifier.height(10.dp))
 
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -456,7 +484,7 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                 Spacer(modifier = Modifier.height(10.dp))
                 ImportRow(
                     icon = "🎙",
-                    label = if (audio == null) "Import Voiceover" else "Replace Voiceover",
+                    label = if (audios.isEmpty()) "Import Voiceover" else "Add More Voiceover",
                     onClick = { audioPicker.launch(arrayOf("audio/*", "application/ogg")) }
                 )
 
@@ -469,19 +497,52 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                     )
                 }
 
-                val currentAudio = audio
-                if (currentAudio != null) {
+                if (audios.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(10.dp))
-                    AudioCard(
-                        audio = currentAudio,
-                        isPlaying = isPlaying,
-                        onTogglePlay = { togglePlay(currentAudio) },
-                        onRemove = {
-                            releasePlayer()
-                            audio = null
+                    AudioListCard(
+                        audios = audios,
+                        playingIndex = playingIndex,
+                        onPlay = { index ->
+                            if (playingIndex == index) {
+                                stopPlayback()
+                            } else {
+                                playFrom(audios, index, false)
+                            }
+                        },
+                        onPlayAll = { playFrom(audios, 0, true) },
+                        onStop = { stopPlayback() },
+                        onMove = { from, to ->
+                            if (to >= 0 && to < audios.size) {
+                                stopPlayback()
+                                val mutable = audios.toMutableList()
+                                val item = mutable.removeAt(from)
+                                mutable.add(to, item)
+                                audios = mutable
+                            }
+                        },
+                        onRemove = { index ->
+                            stopPlayback()
+                            audios = audios.filterIndexed { i, _ -> i != index }
+                        },
+                        onClear = {
+                            stopPlayback()
+                            audios = emptyList()
                             audioError = null
+                        },
+                        onResort = {
+                            stopPlayback()
+                            audios = sortAudios(audios)
                         }
                     )
+
+                    if (audios.size > 1) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        SortReportCard(
+                            title = "Sort check (voiceover parts)",
+                            report = buildReport(audios.map { it.name }),
+                            unnumberedHint = "Parts with no clear number are placed at the end. Use ▲ ▼ to fix the order by hand."
+                        )
+                    }
                 }
 
                 val errorText = audioError
@@ -522,13 +583,21 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
 }
 
 @Composable
-private fun AudioCard(
-    audio: ImportedAudio,
-    isPlaying: Boolean,
-    onTogglePlay: () -> Unit,
-    onRemove: () -> Unit
+private fun AudioListCard(
+    audios: List<ImportedAudio>,
+    playingIndex: Int?,
+    onPlay: (Int) -> Unit,
+    onPlayAll: () -> Unit,
+    onStop: () -> Unit,
+    onMove: (Int, Int) -> Unit,
+    onRemove: (Int) -> Unit,
+    onClear: () -> Unit,
+    onResort: () -> Unit
 ) {
     val shape = RoundedCornerShape(14.dp)
+    val total = audios.sumOf { it.durationMs }
+    val starts = audios.runningFold(0L) { acc, item -> acc + item.durationMs }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -538,37 +607,127 @@ private fun AudioCard(
             .padding(12.dp)
     ) {
         Text(
-            text = audio.name,
+            text = "Voiceover: ${audios.size} part${if (audios.size > 1) "s" else ""}",
             color = Color.White,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Bold,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold
         )
         Text(
-            text = "Total length: ${formatDuration(audio.durationMs)}  (${audio.durationMs} ms)",
+            text = "Total length: ${formatDuration(total)}  ($total ms)",
             color = OkColor,
             fontSize = 13.sp,
             modifier = Modifier.padding(top = 4.dp)
         )
         Spacer(modifier = Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+
+        audios.forEachIndexed { index, audio ->
+            val rowShape = RoundedCornerShape(12.dp)
+            val isThisPlaying = playingIndex == index
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+                    .clip(rowShape)
+                    .background(ClassicNavy)
+                    .border(
+                        1.dp,
+                        (if (isThisPlaying) OkColor else ClassicBlue).copy(alpha = 0.5f),
+                        rowShape
+                    )
+                    .padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${index + 1}",
+                    color = ClassicBlue,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.width(28.dp)
+                )
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 6.dp)
+                ) {
+                    Text(
+                        text = audio.name,
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "${formatDuration(audio.durationMs)} • starts at ${formatDuration(starts[index])}",
+                        color = Color(0xFFB8D4FF),
+                        fontSize = 11.sp
+                    )
+                }
+                Text(
+                    text = if (isThisPlaying) "⏸" else "▶",
+                    color = OkColor,
+                    fontSize = 20.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { onPlay(index) }
+                        .padding(6.dp)
+                )
+                Text(
+                    text = "▲",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { onMove(index, index - 1) }
+                        .padding(6.dp)
+                )
+                Text(
+                    text = "▼",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { onMove(index, index + 1) }
+                        .padding(6.dp)
+                )
+                Text(
+                    text = "✕",
+                    color = WarnColor,
+                    fontSize = 17.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { onRemove(index) }
+                        .padding(6.dp)
+                )
+            }
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             SmallButton(
-                text = if (isPlaying) "Pause" else "Play test",
+                text = if (playingIndex != null) "Stop" else "Play all",
                 modifier = Modifier.weight(1f),
-                onClick = onTogglePlay
+                onClick = { if (playingIndex != null) onStop() else onPlayAll() }
             )
             SmallButton(
-                text = "Remove",
+                text = "Re-sort",
                 modifier = Modifier.weight(1f),
-                onClick = onRemove
+                onClick = onResort
+            )
+            SmallButton(
+                text = "Clear",
+                modifier = Modifier.weight(1f),
+                onClick = onClear
             )
         }
     }
 }
 
 @Composable
-private fun SortReportCard(report: SortReport) {
+private fun SortReportCard(
+    title: String,
+    report: SortReport,
+    unnumberedHint: String
+) {
     val hasIssue = report.unnumbered > 0 ||
         report.duplicates.isNotEmpty() ||
         report.missingTotal > 0
@@ -584,7 +743,7 @@ private fun SortReportCard(report: SortReport) {
             .padding(12.dp)
     ) {
         Text(
-            text = "Sort check",
+            text = title,
             color = Color.White,
             fontSize = 14.sp,
             fontWeight = FontWeight.Bold
@@ -615,7 +774,7 @@ private fun SortReportCard(report: SortReport) {
         }
         if (report.unnumbered > 0) {
             Text(
-                text = "Images with no clear number are placed at the end. Use View / Reorder to fix them by hand.",
+                text = unnumberedHint,
                 color = WarnColor,
                 fontSize = 13.sp,
                 modifier = Modifier.padding(top = 4.dp)
