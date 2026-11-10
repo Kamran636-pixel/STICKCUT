@@ -3,6 +3,8 @@
 
     <application
         android:allowBackup="true"
+        android:icon="@drawable/stickcut_logo"
+        android:roundIcon="@drawable/stickcut_logo"
         android:label="StickCut"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
