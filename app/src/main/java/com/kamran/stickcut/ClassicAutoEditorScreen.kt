@@ -243,6 +243,8 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
     var scriptLoading by remember { mutableStateOf(false) }
     var scriptError by remember { mutableStateOf<String?>(null) }
 
+    var sceneResult by remember { mutableStateOf<SceneBuildResult?>(null) }
+
     fun stopPlayback() {
         try {
             player?.stop()
@@ -419,7 +421,14 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
         matchScripts(scripts, voiceParts, imageNumberSet)
     }
 
-    if (showOrderList) {
+    val currentResult = sceneResult
+
+    if (currentResult != null) {
+        SceneListScreen(
+            result = currentResult,
+            onClose = { sceneResult = null }
+        )
+    } else if (showOrderList) {
         ImageOrderList(
             images = images,
             onImagesChange = { images = it },
@@ -448,7 +457,7 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text(
-                    text = "Build: Step 29",
+                    text = "Build: Step 32",
                     color = Color(0xFF6C85B8),
                     fontSize = 11.sp,
                     textAlign = TextAlign.Center,
@@ -666,7 +675,10 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                         .height(54.dp)
                         .clip(RoundedCornerShape(16.dp))
                         .background(ClassicBlue)
-                        .clickable { },
+                        .clickable {
+                            stopPlayback()
+                            sceneResult = SceneBuilder.build(scriptMatches, voiceParts, images)
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
