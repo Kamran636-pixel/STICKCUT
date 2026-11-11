@@ -20,6 +20,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -32,18 +36,47 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import java.util.Locale
 
 private val SceneNavy = Color(0xFF050B1F)
 private val SceneBlue = Color(0xFF2D8CFF)
+private val SceneCard = Color(0xFF0F2F70)
 private val SceneDark = Color(0xFF0A1A44)
 private val SceneOk = Color(0xFF6BE3A0)
 private val SceneErr = Color(0xFFFF6B6B)
 private val SceneSoft = Color(0xFFB8D4FF)
 
+// Keeps the animation settings while the app is open.
+// Phase 15 (project saving) will store them permanently.
+object AnimationStore {
+    var settings by mutableStateOf(AnimationSettings())
+}
+
+private fun secLabel(ms: Long): String {
+    return String.format(Locale.US, "%.1fs", ms / 1000f)
+}
+
 private fun secondsText(ms: Long): String {
     val whole = ms / 1000L
     val tenth = (ms % 1000L) / 100L
     return "$whole.$tenth s"
+}
+
+private fun settingsSummary(settings: AnimationSettings): String {
+    val animation = when (settings.mode) {
+        AnimationMode.GLOBAL ->
+            "Global: ${settings.global.type.label}, ${secLabel(settings.global.durationMs)}"
+        AnimationMode.PER_SCENE ->
+            "Per Scene (${settings.perScene.size} custom)"
+        AnimationMode.RANDOM ->
+            "Random"
+    }
+    val transition = if (settings.transition.type == TransitionType.NONE) {
+        "No transition"
+    } else {
+        "${settings.transition.type.label} ${secLabel(settings.transition.durationMs)}"
+    }
+    return "$animation  •  $transition"
 }
 
 @Composable
@@ -52,7 +85,24 @@ fun SceneListScreen(
     onClose: () -> Unit
 ) {
     val context = LocalContext.current
-    BackHandler(enabled = true) { onClose() }
+    var showAnimation by remember { mutableStateOf(false) }
+    val settings = AnimationStore.settings
+
+    BackHandler(enabled = !showAnimation) { onClose() }
+
+    if (showAnimation) {
+        AnimationSettingsScreen(
+            settings = settings,
+            scenes = result.scenes,
+            onSettingsChange = { AnimationStore.settings = it },
+            onClose = { showAnimation = false }
+        )
+        return
+    }
+
+    val plannedByScene = remember(settings, result.scenes) {
+        AnimationEngine.plan(result.scenes, settings).associateBy { it.sceneIndex }
+    }
 
     Box(
         modifier = Modifier
@@ -121,6 +171,35 @@ fun SceneListScreen(
                     )
                 }
             }
+
+            if (result.scenes.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                val buttonShape = RoundedCornerShape(14.dp)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(buttonShape)
+                        .background(SceneCard)
+                        .border(1.dp, SceneBlue.copy(alpha = 0.7f), buttonShape)
+                        .clickable { showAnimation = true }
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                ) {
+                    Text(
+                        text = "🎬  Animation Settings",
+                        color = Color.White,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = settingsSummary(settings),
+                        color = SceneSoft,
+                        fontSize = 12.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
+            }
             Spacer(modifier = Modifier.height(10.dp))
 
             LazyColumn(
@@ -130,6 +209,7 @@ fun SceneListScreen(
             ) {
                 items(result.scenes, key = { it.index }) { scene ->
                     val shape = RoundedCornerShape(14.dp)
+                    val planned = plannedByScene[scene.index]
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -167,6 +247,14 @@ fun SceneListScreen(
                                 fontSize = 12.sp,
                                 modifier = Modifier.padding(top = 2.dp)
                             )
+                            if (planned != null) {
+                                Text(
+                                    text = "🎞 ${planned.config.type.label}",
+                                    color = SceneOk,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
                             Text(
                                 text = scene.text,
                                 color = SceneSoft,
