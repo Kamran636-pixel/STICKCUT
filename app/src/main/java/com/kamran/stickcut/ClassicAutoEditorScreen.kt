@@ -242,6 +242,7 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
     var scripts by remember { mutableStateOf<List<LoadedScript>>(emptyList()) }
     var scriptLoading by remember { mutableStateOf(false) }
     var scriptError by remember { mutableStateOf<String?>(null) }
+    var showPaste by remember { mutableStateOf(false) }
 
     var sceneResult by remember { mutableStateOf<SceneBuildResult?>(null) }
 
@@ -428,6 +429,22 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
             result = currentResult,
             onClose = { sceneResult = null }
         )
+    } else if (showPaste) {
+        PasteScriptScreen(
+            parts = voiceParts,
+            onSave = { name, text ->
+                val pasted = loadScript(
+                    name,
+                    Uri.parse("paste://script/${System.nanoTime()}"),
+                    text
+                )
+                scripts = (scripts + pasted).sortedWith(
+                    Comparator { a, b -> compareFileNames(a.name, b.name) }
+                )
+                showPaste = false
+            },
+            onClose = { showPaste = false }
+        )
     } else if (showOrderList) {
         ImageOrderList(
             images = images,
@@ -457,7 +474,7 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text(
-                    text = "Build: Step 32",
+                    text = "Build: Step 34",
                     color = Color(0xFF6C85B8),
                     fontSize = 11.sp,
                     textAlign = TextAlign.Center,
@@ -629,8 +646,14 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                 Spacer(modifier = Modifier.height(10.dp))
                 ImportRow(
                     icon = "📄",
-                    label = if (scripts.isEmpty()) "Import Script (.txt)" else "Add More Scripts",
+                    label = if (scripts.isEmpty()) "Import Script (.txt)" else "Add Script File (.txt)",
                     onClick = { scriptPicker.launch(arrayOf("*/*")) }
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                ImportRow(
+                    icon = "📋",
+                    label = "Paste Script",
+                    onClick = { showPaste = true }
                 )
 
                 if (scriptLoading) {
