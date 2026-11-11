@@ -474,7 +474,7 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text(
-                    text = "Build: Step 34",
+                    text = "Build: Step 39",
                     color = Color(0xFF6C85B8),
                     fontSize = 11.sp,
                     textAlign = TextAlign.Center,
@@ -700,6 +700,7 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                         .background(ClassicBlue)
                         .clickable {
                             stopPlayback()
+                            ProjectStore.audios = audios
                             sceneResult = SceneBuilder.build(scriptMatches, voiceParts, images)
                         },
                     contentAlignment = Alignment.Center
