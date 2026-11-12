@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -37,6 +38,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 private val SceneNavy = Color(0xFF050B1F)
@@ -48,7 +51,7 @@ private val SceneErr = Color(0xFFFF6B6B)
 private val SceneSoft = Color(0xFFB8D4FF)
 
 // Keeps the animation settings while the app is open.
-// Phase 15 (project saving) will store them permanently.
+// The project file (ProjectStorage) also stores them permanently.
 object AnimationStore {
     var settings by mutableStateOf(AnimationSettings())
 }
@@ -88,10 +91,23 @@ fun SceneListScreen(
     val context = LocalContext.current
     var showAnimation by remember { mutableStateOf(false) }
     var showPreview by remember { mutableStateOf(false) }
+    var saveText by remember { mutableStateOf("") }
     val settings = AnimationStore.settings
 
     val plannedByScene = remember(settings, result.scenes) {
         AnimationEngine.plan(result.scenes, settings).associateBy { it.sceneIndex }
+    }
+
+    // Saves the project automatically (again after every settings change).
+    LaunchedEffect(result, settings) {
+        if (result.ok) {
+            val saved = withContext(Dispatchers.IO) {
+                ProjectStorage.save(context, result, ProjectStore.audios, settings)
+            }
+            saveText = if (saved) "💾 Project saved" else "⚠ Could not save the project"
+        } else {
+            saveText = ""
+        }
     }
 
     BackHandler(enabled = !showAnimation && !showPreview) { onClose() }
@@ -171,6 +187,14 @@ fun SceneListScreen(
                         text = "${result.scenes.size} scenes  •  total ${ScriptParser.formatTimestamp(result.totalMs)}",
                         color = SceneSoft,
                         fontSize = 13.sp,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+                if (saveText.isNotEmpty()) {
+                    Text(
+                        text = saveText,
+                        color = if (saveText.startsWith("💾")) SceneOk else SceneErr,
+                        fontSize = 12.sp,
                         modifier = Modifier.padding(top = 4.dp)
                     )
                 }
