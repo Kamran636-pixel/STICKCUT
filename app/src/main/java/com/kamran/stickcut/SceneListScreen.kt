@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -86,9 +87,24 @@ fun SceneListScreen(
 ) {
     val context = LocalContext.current
     var showAnimation by remember { mutableStateOf(false) }
+    var showPreview by remember { mutableStateOf(false) }
     val settings = AnimationStore.settings
 
-    BackHandler(enabled = !showAnimation) { onClose() }
+    val plannedByScene = remember(settings, result.scenes) {
+        AnimationEngine.plan(result.scenes, settings).associateBy { it.sceneIndex }
+    }
+
+    BackHandler(enabled = !showAnimation && !showPreview) { onClose() }
+
+    if (showPreview) {
+        PreviewPlayerScreen(
+            scenes = result.scenes,
+            audios = ProjectStore.audios,
+            settings = settings,
+            onClose = { showPreview = false }
+        )
+        return
+    }
 
     if (showAnimation) {
         AnimationSettingsScreen(
@@ -98,10 +114,6 @@ fun SceneListScreen(
             onClose = { showAnimation = false }
         )
         return
-    }
-
-    val plannedByScene = remember(settings, result.scenes) {
-        AnimationEngine.plan(result.scenes, settings).associateBy { it.sceneIndex }
     }
 
     Box(
@@ -173,6 +185,26 @@ fun SceneListScreen(
             }
 
             if (result.scenes.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                val playShape = RoundedCornerShape(14.dp)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .clip(playShape)
+                        .background(SceneBlue)
+                        .clickable { showPreview = true },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "▶  Play Preview",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center
+                    )
+                }
+
                 Spacer(modifier = Modifier.height(10.dp))
                 val buttonShape = RoundedCornerShape(14.dp)
                 Column(
