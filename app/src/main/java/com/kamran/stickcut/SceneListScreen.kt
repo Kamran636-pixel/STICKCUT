@@ -93,6 +93,7 @@ fun SceneListScreen(
     var current by remember(result) { mutableStateOf(result) }
     var showAnimation by remember { mutableStateOf(false) }
     var showManual by remember { mutableStateOf(false) }
+    var showExport by remember { mutableStateOf(false) }
     var showPreview by remember { mutableStateOf(false) }
     var saveText by remember { mutableStateOf("") }
     val settings = AnimationStore.settings
@@ -113,7 +114,16 @@ fun SceneListScreen(
         }
     }
 
-    BackHandler(enabled = !showAnimation && !showPreview && !showManual) { onClose() }
+    BackHandler(enabled = !showAnimation && !showPreview && !showManual && !showExport) { onClose() }
+
+    if (showExport) {
+        ExportScreen(
+            scenes = current.scenes,
+            audios = ProjectStore.audios,
+            onClose = { showExport = false }
+        )
+        return
+    }
 
     if (showManual) {
         ManualEditorScreen(
@@ -294,6 +304,24 @@ fun SceneListScreen(
                         text = "✏️  Edit Manually",
                         color = Color.White,
                         fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .clip(buttonShape)
+                        .background(SceneBlue)
+                        .clickable { showExport = true },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "📤  Export Video",
+                        color = Color.White,
+                        fontSize = 18.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
