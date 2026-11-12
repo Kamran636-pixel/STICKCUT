@@ -38,7 +38,9 @@ private val GlowBorder = Color(0xFF3FA2FF)
 
 @Composable
 fun HomeScreen(
-    onOpenClassic: () -> Unit = {}
+    onOpenClassic: () -> Unit = {},
+    onOpenRecent: () -> Unit = {},
+    recentMessage: String? = null
 ) {
     Box(
         modifier = Modifier
@@ -56,6 +58,17 @@ fun HomeScreen(
 
             HeroBanner()
             Spacer(modifier = Modifier.height(16.dp))
+
+            if (recentMessage != null) {
+                Text(
+                    text = recentMessage,
+                    color = Color(0xFFFFC857),
+                    fontSize = 13.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp)
+                )
+            }
 
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 DashCard(
@@ -89,7 +102,8 @@ fun HomeScreen(
                     title = "Recent\nProjects",
                     subtitle = "Open saved",
                     modifier = Modifier.weight(1f),
-                    cardHeight = 120
+                    cardHeight = 120,
+                    onClick = onOpenRecent
                 )
             }
             Spacer(modifier = Modifier.height(12.dp))
