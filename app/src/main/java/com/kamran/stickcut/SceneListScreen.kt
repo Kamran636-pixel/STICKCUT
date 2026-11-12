@@ -89,20 +89,23 @@ fun SceneListScreen(
     onClose: () -> Unit
 ) {
     val context = LocalContext.current
+    // Local copy so manual edits can replace the scenes on this screen.
+    var current by remember(result) { mutableStateOf(result) }
     var showAnimation by remember { mutableStateOf(false) }
+    var showManual by remember { mutableStateOf(false) }
     var showPreview by remember { mutableStateOf(false) }
     var saveText by remember { mutableStateOf("") }
     val settings = AnimationStore.settings
 
-    val plannedByScene = remember(settings, result.scenes) {
-        AnimationEngine.plan(result.scenes, settings).associateBy { it.sceneIndex }
+    val plannedByScene = remember(settings, current.scenes) {
+        AnimationEngine.plan(current.scenes, settings).associateBy { it.sceneIndex }
     }
 
     // Saves the project automatically (again after every settings change).
-    LaunchedEffect(result, settings) {
-        if (result.ok) {
+    LaunchedEffect(current, settings) {
+        if (current.ok) {
             val saved = withContext(Dispatchers.IO) {
-                ProjectStorage.save(context, result, ProjectStore.audios, settings)
+                ProjectStorage.save(context, current, ProjectStore.audios, settings)
             }
             saveText = if (saved) "💾 Project saved" else "⚠ Could not save the project"
         } else {
@@ -110,11 +113,31 @@ fun SceneListScreen(
         }
     }
 
-    BackHandler(enabled = !showAnimation && !showPreview) { onClose() }
+    BackHandler(enabled = !showAnimation && !showPreview && !showManual) { onClose() }
+
+    if (showManual) {
+        ManualEditorScreen(
+            scenes = current.scenes,
+            totalMs = current.totalMs,
+            audios = ProjectStore.audios,
+            settings = settings,
+            onApply = { newScenes, newSettings ->
+                AnimationStore.settings = newSettings
+                current = SceneBuildResult(
+                    scenes = newScenes,
+                    problems = emptyList(),
+                    totalMs = current.totalMs
+                )
+                showManual = false
+            },
+            onClose = { showManual = false }
+        )
+        return
+    }
 
     if (showPreview) {
         PreviewPlayerScreen(
-            scenes = result.scenes,
+            scenes = current.scenes,
             audios = ProjectStore.audios,
             settings = settings,
             onClose = { showPreview = false }
@@ -125,7 +148,7 @@ fun SceneListScreen(
     if (showAnimation) {
         AnimationSettingsScreen(
             settings = settings,
-            scenes = result.scenes,
+            scenes = current.scenes,
             onSettingsChange = { AnimationStore.settings = it },
             onClose = { showAnimation = false }
         )
@@ -167,7 +190,7 @@ fun SceneListScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             val summaryShape = RoundedCornerShape(14.dp)
-            val summaryColor = if (result.ok) SceneOk else SceneErr
+            val summaryColor = if (current.ok) SceneOk else SceneErr
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -177,14 +200,14 @@ fun SceneListScreen(
                     .padding(12.dp)
             ) {
                 Text(
-                    text = if (result.ok) "✓ Scenes created" else "✖ Scenes could not be created",
+                    text = if (current.ok) "✓ Scenes created" else "✖ Scenes could not be created",
                     color = summaryColor,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold
                 )
-                if (result.scenes.isNotEmpty()) {
+                if (current.scenes.isNotEmpty()) {
                     Text(
-                        text = "${result.scenes.size} scenes  •  total ${ScriptParser.formatTimestamp(result.totalMs)}",
+                        text = "${current.scenes.size} scenes  •  total ${ScriptParser.formatTimestamp(current.totalMs)}",
                         color = SceneSoft,
                         fontSize = 13.sp,
                         modifier = Modifier.padding(top = 4.dp)
@@ -198,7 +221,7 @@ fun SceneListScreen(
                         modifier = Modifier.padding(top = 4.dp)
                     )
                 }
-                result.problems.forEach { problem ->
+                current.problems.forEach { problem ->
                     Text(
                         text = "✖ $problem",
                         color = SceneErr,
@@ -208,7 +231,7 @@ fun SceneListScreen(
                 }
             }
 
-            if (result.scenes.isNotEmpty()) {
+            if (current.scenes.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(10.dp))
                 val playShape = RoundedCornerShape(14.dp)
                 Box(
@@ -255,6 +278,25 @@ fun SceneListScreen(
                         modifier = Modifier.padding(top = 2.dp)
                     )
                 }
+
+                Spacer(modifier = Modifier.height(10.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .clip(buttonShape)
+                        .background(SceneCard)
+                        .border(1.dp, SceneBlue.copy(alpha = 0.7f), buttonShape)
+                        .clickable { showManual = true },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "✏️  Edit Manually",
+                        color = Color.White,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
             Spacer(modifier = Modifier.height(10.dp))
 
@@ -263,7 +305,7 @@ fun SceneListScreen(
                 contentPadding = PaddingValues(bottom = 120.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(result.scenes, key = { it.index }) { scene ->
+                items(current.scenes, key = { it.index }) { scene ->
                     val shape = RoundedCornerShape(14.dp)
                     val planned = plannedByScene[scene.index]
                     Row(
