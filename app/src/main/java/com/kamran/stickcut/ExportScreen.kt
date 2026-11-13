@@ -3,6 +3,7 @@ package com.kamran.stickcut
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Matrix
+import android.media.MediaCodecList
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -51,6 +52,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.MatrixTransformation
 import androidx.media3.effect.Presentation
 import androidx.media3.transformer.Composition
+import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.Effects
@@ -58,6 +60,7 @@ import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
+import androidx.media3.transformer.VideoEncoderSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -73,13 +76,74 @@ private val ExCard = Color(0xFF0F2F70)
 private val ExDark = Color(0xFF0A1A44)
 private val ExOk = Color(0xFF6BE3A0)
 private val ExErr = Color(0xFFFF6B6B)
+private val ExWarn = Color(0xFFFFC857)
 private val ExSoft = Color(0xFFB8D4FF)
 
-private const val EXPORT_WIDTH = 1280
-private const val EXPORT_HEIGHT = 720
-private const val EXPORT_FPS = 30
-
 private enum class ExportStatus { IDLE, RUNNING, SAVING, DONE, FAILED }
+
+private data class ResolutionOption(val label: String, val width: Int, val height: Int)
+
+private val resolutionOptions = listOf(
+    ResolutionOption("720p", 1280, 720),
+    ResolutionOption("1080p", 1920, 1080),
+    ResolutionOption("1440p", 2560, 1440),
+    ResolutionOption("4K", 3840, 2160)
+)
+
+private val fpsOptions = listOf(24, 30, 60, 90)
+
+// Video bitrate in bits per second for a size and frame rate.
+private fun targetBitrate(width: Int, height: Int, fps: Int): Int {
+    val pixels = width.toLong() * height.toLong()
+    val base = when {
+        pixels <= 1280L * 720L -> 8_000_000L
+        pixels <= 1920L * 1080L -> 16_000_000L
+        pixels <= 2560L * 1440L -> 30_000_000L
+        else -> 50_000_000L
+    }
+    val scaled = base * fps / 30L
+    return scaled.coerceAtMost(120_000_000L).toInt()
+}
+
+// Does this phone have an H.264 encoder that accepts this size and frame rate?
+private fun phoneSupports(width: Int, height: Int, fps: Int): Boolean {
+    return try {
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any { info ->
+            info.isEncoder &&
+                info.supportedTypes.any { it.equals(MimeTypes.VIDEO_H264, ignoreCase = true) } &&
+                try {
+                    val caps = info.getCapabilitiesForType(MimeTypes.VIDEO_H264).videoCapabilities
+                    caps != null && caps.areSizeAndRateSupported(width, height, fps.toDouble())
+                } catch (e: Exception) {
+                    false
+                }
+        }
+    } catch (e: Exception) {
+        false
+    }
+}
+
+// Keeps the bitrate inside what the phone's encoder allows.
+private fun clampBitrate(bitrate: Int): Int {
+    return try {
+        var result = bitrate
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.forEach { info ->
+            if (info.isEncoder &&
+                info.supportedTypes.any { it.equals(MimeTypes.VIDEO_H264, ignoreCase = true) }
+            ) {
+                val caps = info.getCapabilitiesForType(MimeTypes.VIDEO_H264).videoCapabilities
+                val range = caps?.bitrateRange
+                if (range != null) {
+                    result = range.clamp(bitrate)
+                    return result
+                }
+            }
+        }
+        result
+    } catch (e: Exception) {
+        bitrate
+    }
+}
 
 // Every picture is shown for exactly its scene time and moves with the same
 // animation maths as the preview. The voiceover parts play back to back.
@@ -87,11 +151,14 @@ private enum class ExportStatus { IDLE, RUNNING, SAVING, DONE, FAILED }
 private fun buildComposition(
     scenes: List<Scene>,
     audios: List<ImportedAudio>,
-    settings: AnimationSettings
+    settings: AnimationSettings,
+    width: Int,
+    height: Int,
+    fps: Int
 ): Composition {
     val presentation = Presentation.createForWidthAndHeight(
-        EXPORT_WIDTH,
-        EXPORT_HEIGHT,
+        width,
+        height,
         Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP
     )
     val planned = AnimationEngine.plan(scenes, settings)
@@ -121,7 +188,7 @@ private fun buildComposition(
         }
 
         EditedMediaItem.Builder(mediaItem)
-            .setFrameRate(EXPORT_FPS)
+            .setFrameRate(fps)
             .setEffects(Effects(emptyList(), effects))
             .build()
     }
@@ -198,9 +265,18 @@ fun ExportScreen(
     var progress by remember { mutableStateOf(0) }
     var message by remember { mutableStateOf<String?>(null) }
     var transformer by remember { mutableStateOf<Transformer?>(null) }
+    var resolutionIndex by remember { mutableStateOf(0) }
+    var fps by remember { mutableStateOf(30) }
 
     val running = status == ExportStatus.RUNNING || status == ExportStatus.SAVING
     val totalMs = scenes.lastOrNull()?.endMs ?: 0L
+
+    val resolution = resolutionOptions[resolutionIndex]
+    val supported = remember(resolutionIndex, fps) {
+        phoneSupports(resolution.width, resolution.height, fps)
+    }
+    val bitrate = targetBitrate(resolution.width, resolution.height, fps)
+    val estimatedMb = (bitrate.toLong() * (totalMs / 1000L) / 8L / 1_000_000L) + 1L
 
     DisposableEffect(running) {
         view.keepScreenOn = running
@@ -243,12 +319,19 @@ fun ExportScreen(
         val folder = File(context.cacheDir, "export")
         folder.mkdirs()
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val name = "StickCut_$stamp.mp4"
+        val name = "StickCut_${resolution.label}_${fps}fps_$stamp.mp4"
         val file = File(folder, name)
         if (file.exists()) file.delete()
 
         val composition = try {
-            buildComposition(scenes, audios, AnimationStore.settings)
+            buildComposition(
+                scenes,
+                audios,
+                AnimationStore.settings,
+                resolution.width,
+                resolution.height,
+                fps
+            )
         } catch (e: Exception) {
             status = ExportStatus.FAILED
             message = "Could not prepare the export: ${e.message ?: "unknown error"}"
@@ -279,15 +362,27 @@ fun ExportScreen(
             ) {
                 transformer = null
                 status = ExportStatus.FAILED
-                message = "Export failed: ${exportException.message ?: "unknown error"} " +
-                    "(code ${exportException.errorCodeName})"
+                message = "Export failed at ${resolution.label} / $fps fps: " +
+                    "${exportException.message ?: "unknown error"} " +
+                    "(code ${exportException.errorCodeName}). " +
+                    "Your phone may not support this setting. Try a lower one."
             }
         }
 
         try {
+            val encoderFactory = DefaultEncoderFactory.Builder(context)
+                .setRequestedVideoEncoderSettings(
+                    VideoEncoderSettings.Builder()
+                        .setBitrate(clampBitrate(bitrate))
+                        .build()
+                )
+                // No silent downgrade: if the phone cannot do it, show a clear error.
+                .setEnableFallback(false)
+                .build()
             val t = Transformer.Builder(context)
                 .setVideoMimeType(MimeTypes.VIDEO_H264)
                 .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                .setEncoderFactory(encoderFactory)
                 .addListener(listener)
                 .build()
             transformer = t
@@ -335,6 +430,48 @@ fun ExportScreen(
             }
             Spacer(modifier = Modifier.height(12.dp))
 
+            if (!running) {
+                Text(
+                    text = "Resolution",
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    resolutionOptions.forEachIndexed { index, option ->
+                        val ok = phoneSupports(option.width, option.height, fps)
+                        ExChip(
+                            text = if (ok) option.label else "⚠ ${option.label}",
+                            selected = index == resolutionIndex,
+                            modifier = Modifier.weight(1f),
+                            onClick = { resolutionIndex = index }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Frame rate",
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    fpsOptions.forEach { option ->
+                        val ok = phoneSupports(resolution.width, resolution.height, option)
+                        ExChip(
+                            text = if (ok) "$option fps" else "⚠ $option fps",
+                            selected = option == fps,
+                            modifier = Modifier.weight(1f),
+                            onClick = { fps = option }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
             val infoShape = RoundedCornerShape(14.dp)
             Column(
                 modifier = Modifier
@@ -351,7 +488,7 @@ fun ExportScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "MP4 (H.264 + AAC)  •  ${EXPORT_WIDTH}×${EXPORT_HEIGHT}  •  $EXPORT_FPS fps",
+                    text = "MP4 (H.264 + AAC)  •  ${resolution.width}×${resolution.height}  •  $fps fps",
                     color = ExSoft,
                     fontSize = 13.sp,
                     modifier = Modifier.padding(top = 4.dp)
@@ -363,14 +500,28 @@ fun ExportScreen(
                     modifier = Modifier.padding(top = 2.dp)
                 )
                 Text(
+                    text = "Quality: ${bitrate / 1_000_000} Mbps  •  about $estimatedMb MB",
+                    color = ExSoft,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+                Text(
                     text = animationLine(settings),
                     color = ExOk,
                     fontSize = 13.sp,
                     modifier = Modifier.padding(top = 2.dp)
                 )
+                if (!supported) {
+                    Text(
+                        text = "⚠ This phone's video encoder does not list this size/frame rate as supported. The export may fail.",
+                        color = ExWarn,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
                 Text(
                     text = "Transitions between scenes and captions come in the next steps.",
-                    color = Color(0xFFFFC857),
+                    color = ExWarn,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(top = 8.dp)
                 )
@@ -380,7 +531,7 @@ fun ExportScreen(
             if (audios.isEmpty()) {
                 Text(
                     text = "No voiceover is loaded, so the video will have no sound.",
-                    color = Color(0xFFFFC857),
+                    color = ExWarn,
                     fontSize = 13.sp,
                     modifier = Modifier.padding(bottom = 10.dp)
                 )
@@ -447,6 +598,37 @@ fun ExportScreen(
         }
 
         CreatorBrand(modifier = Modifier.align(Alignment.BottomCenter))
+    }
+}
+
+@Composable
+private fun ExChip(
+    text: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val shape = RoundedCornerShape(12.dp)
+    Box(
+        modifier = modifier
+            .height(44.dp)
+            .clip(shape)
+            .background(if (selected) ExBlue else ExCard)
+            .border(
+                if (selected) 2.dp else 1.dp,
+                if (selected) Color.White else ExBlue.copy(alpha = 0.6f),
+                shape
+            )
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = text,
+            color = Color.White,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center
+        )
     }
 }
 
