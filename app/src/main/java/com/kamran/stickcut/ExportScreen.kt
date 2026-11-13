@@ -2,6 +2,7 @@ package com.kamran.stickcut
 
 import android.content.ContentValues
 import android.content.Context
+import android.graphics.Matrix
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -47,6 +48,7 @@ import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.MatrixTransformation
 import androidx.media3.effect.Presentation
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
@@ -79,25 +81,48 @@ private const val EXPORT_FPS = 30
 
 private enum class ExportStatus { IDLE, RUNNING, SAVING, DONE, FAILED }
 
-// Every picture is shown for exactly its scene time; the voiceover parts play back to back.
+// Every picture is shown for exactly its scene time and moves with the same
+// animation maths as the preview. The voiceover parts play back to back.
 @OptIn(UnstableApi::class)
 private fun buildComposition(
     scenes: List<Scene>,
-    audios: List<ImportedAudio>
+    audios: List<ImportedAudio>,
+    settings: AnimationSettings
 ): Composition {
     val presentation = Presentation.createForWidthAndHeight(
         EXPORT_WIDTH,
         EXPORT_HEIGHT,
         Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP
     )
-    val imageItems = scenes.map { scene ->
+    val planned = AnimationEngine.plan(scenes, settings)
+
+    val imageItems = scenes.mapIndexed { position, scene ->
         val mediaItem = MediaItem.Builder()
             .setUri(scene.imageUri)
             .setImageDurationMs(scene.durationMs)
             .build()
+
+        val effects = mutableListOf<Effect>(presentation)
+        val plan = planned.getOrNull(position)
+        if (plan != null && plan.config.type != AnimationType.NONE) {
+            val durationMs = scene.durationMs
+            effects.add(
+                MatrixTransformation { presentationTimeUs ->
+                    val localMs = (presentationTimeUs / 1000L).coerceIn(0L, durationMs)
+                    val t = AnimationEngine.transformAtTime(plan.config, plan, localMs)
+                    val matrix = Matrix()
+                    // Picture zooms around its centre, then moves.
+                    // The screen is 2 units wide and tall (-1..1), y points up.
+                    matrix.postScale(t.scale, t.scale)
+                    matrix.postTranslate(t.offsetX * 2f, -t.offsetY * 2f)
+                    matrix
+                }
+            )
+        }
+
         EditedMediaItem.Builder(mediaItem)
             .setFrameRate(EXPORT_FPS)
-            .setEffects(Effects(emptyList(), listOf<Effect>(presentation)))
+            .setEffects(Effects(emptyList(), effects))
             .build()
     }
     val sequences = mutableListOf(EditedMediaItemSequence(imageItems))
@@ -149,6 +174,14 @@ private fun saveToMovies(context: Context, file: File, displayName: String): Str
     }
 }
 
+private fun animationLine(settings: AnimationSettings): String {
+    return when (settings.mode) {
+        AnimationMode.GLOBAL -> "Animation: ${settings.global.type.label} (all scenes)"
+        AnimationMode.PER_SCENE -> "Animation: per scene (${settings.perScene.size} custom)"
+        AnimationMode.RANDOM -> "Animation: random"
+    }
+}
+
 @OptIn(UnstableApi::class)
 @Composable
 fun ExportScreen(
@@ -159,12 +192,12 @@ fun ExportScreen(
     val context = LocalContext.current
     val view = LocalView.current
     val scope = rememberCoroutineScope()
+    val settings = AnimationStore.settings
 
     var status by remember { mutableStateOf(ExportStatus.IDLE) }
     var progress by remember { mutableStateOf(0) }
     var message by remember { mutableStateOf<String?>(null) }
     var transformer by remember { mutableStateOf<Transformer?>(null) }
-    var outputFile by remember { mutableStateOf<File?>(null) }
 
     val running = status == ExportStatus.RUNNING || status == ExportStatus.SAVING
     val totalMs = scenes.lastOrNull()?.endMs ?: 0L
@@ -213,10 +246,9 @@ fun ExportScreen(
         val name = "StickCut_$stamp.mp4"
         val file = File(folder, name)
         if (file.exists()) file.delete()
-        outputFile = file
 
         val composition = try {
-            buildComposition(scenes, audios)
+            buildComposition(scenes, audios, AnimationStore.settings)
         } catch (e: Exception) {
             status = ExportStatus.FAILED
             message = "Could not prepare the export: ${e.message ?: "unknown error"}"
@@ -331,7 +363,13 @@ fun ExportScreen(
                     modifier = Modifier.padding(top = 2.dp)
                 )
                 Text(
-                    text = "First version: pictures + voiceover only. Animation, transitions and captions come in the next steps.",
+                    text = animationLine(settings),
+                    color = ExOk,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+                Text(
+                    text = "Transitions between scenes and captions come in the next steps.",
                     color = Color(0xFFFFC857),
                     fontSize = 12.sp,
                     modifier = Modifier.padding(top = 8.dp)
