@@ -83,6 +83,14 @@ private fun settingsSummary(settings: AnimationSettings): String {
     return "$animation  •  $transition"
 }
 
+private fun captionSummary(style: CaptionStyle): String {
+    return if (style.enabled) {
+        "ON  •  ${style.animation.label}  •  ${style.position.label}"
+    } else {
+        "OFF"
+    }
+}
+
 @Composable
 fun SceneListScreen(
     result: SceneBuildResult,
@@ -94,9 +102,11 @@ fun SceneListScreen(
     var showAnimation by remember { mutableStateOf(false) }
     var showManual by remember { mutableStateOf(false) }
     var showExport by remember { mutableStateOf(false) }
+    var showCaptions by remember { mutableStateOf(false) }
     var showPreview by remember { mutableStateOf(false) }
     var saveText by remember { mutableStateOf("") }
     val settings = AnimationStore.settings
+    val captionStyle = CaptionStore.style
 
     val plannedByScene = remember(settings, current.scenes) {
         AnimationEngine.plan(current.scenes, settings).associateBy { it.sceneIndex }
@@ -114,7 +124,17 @@ fun SceneListScreen(
         }
     }
 
-    BackHandler(enabled = !showAnimation && !showPreview && !showManual && !showExport) { onClose() }
+    BackHandler(
+        enabled = !showAnimation && !showPreview && !showManual && !showExport && !showCaptions
+    ) { onClose() }
+
+    if (showCaptions) {
+        CaptionStudioScreen(
+            scenes = current.scenes,
+            onClose = { showCaptions = false }
+        )
+        return
+    }
 
     if (showExport) {
         ExportScreen(
@@ -285,6 +305,30 @@ fun SceneListScreen(
                         fontSize = 12.sp,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(buttonShape)
+                        .background(SceneCard)
+                        .border(1.dp, SceneBlue.copy(alpha = 0.7f), buttonShape)
+                        .clickable { showCaptions = true }
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                ) {
+                    Text(
+                        text = "🔤  Captions",
+                        color = Color.White,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = captionSummary(captionStyle),
+                        color = SceneSoft,
+                        fontSize = 12.sp,
                         modifier = Modifier.padding(top = 2.dp)
                     )
                 }
