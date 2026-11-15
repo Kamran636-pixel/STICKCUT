@@ -213,7 +213,11 @@ private fun buildComposition(
             )
         }
 
+        // Media3 1.4.1 needs BOTH the picture's duration and its frame rate
+        // set on the EditedMediaItem. Without the duration it throws an
+        // IllegalStateException inside ImageAssetLoader.
         EditedMediaItem.Builder(mediaItem)
+            .setDurationUs(scene.durationMs * 1000L)
             .setFrameRate(fps)
             .setEffects(Effects(emptyList(), effects))
             .build()
@@ -551,7 +555,7 @@ fun ExportScreen(
                     modifier = Modifier.padding(top = 8.dp)
                 )
                 Text(
-                    text = "Export build: Step 58",
+                    text = "Export build: Step 59",
                     color = Color(0xFF6C85B8),
                     fontSize = 11.sp,
                     modifier = Modifier.padding(top = 6.dp)
