@@ -56,6 +56,13 @@ private val AsCard = Color(0xFF0F2F70)
 private val AsDark = Color(0xFF0A1A44)
 private val AsSoft = Color(0xFFB8D4FF)
 private val AsWarn = Color(0xFFFFC857)
+private val AsOk = Color(0xFF6BE3A0)
+
+// Zoom depth (in percent) <-> the engine's intensity.
+// Zoom In grows the picture by 15% x intensity, so intensity = depth / 15.
+private const val ZOOM_PERCENT_PER_INTENSITY = 15f
+private const val ZOOM_MIN_PERCENT = 8f
+private const val ZOOM_MAX_PERCENT = 20f
 
 private fun secondsLabel(ms: Long): String {
     return String.format(Locale.US, "%.1fs", ms / 1000f)
@@ -73,6 +80,8 @@ fun AnimationSettingsScreen(
 
     var selectedPos by remember { mutableStateOf(0) }
     var playKey by remember { mutableStateOf(0) }
+    var zoomDepth by remember { mutableStateOf(8f) }
+    var zoomNote by remember { mutableStateOf<String?>(null) }
 
     val mode = settings.mode
     val safePos = if (selectedPos in scenes.indices) selectedPos else 0
@@ -101,6 +110,26 @@ fun AnimationSettingsScreen(
             settings.copy(global = fixed)
         }
         onSettingsChange(next)
+    }
+
+    // A zoom config: the movement lasts as long as the picture is on screen
+    // (up to the 10 s maximum), at normal speed, with the chosen depth.
+    fun zoomConfig(type: AnimationType, depthPercent: Float): AnimationConfig {
+        return settings.global.copy(
+            type = type,
+            durationMs = AnimationConfig.MAX_DURATION_MS,
+            speed = SpeedPreset.NORMAL,
+            intensity = depthPercent / ZOOM_PERCENT_PER_INTENSITY
+        ).normalized()
+    }
+
+    // Changing the depth only touches Zoom In / Zoom Out settings.
+    fun withDepth(config: AnimationConfig, depthPercent: Float): AnimationConfig {
+        return if (config.type == AnimationType.ZOOM_IN || config.type == AnimationType.ZOOM_OUT) {
+            config.copy(intensity = depthPercent / ZOOM_PERCENT_PER_INTENSITY).normalized()
+        } else {
+            config
+        }
     }
 
     val progress = remember { Animatable(0f) }
@@ -217,6 +246,141 @@ fun AnimationSettingsScreen(
                 modifier = Modifier.fillMaxWidth(),
                 onClick = { playKey += 1 }
             )
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // ---------------- Quick Zoom ----------------
+            val zoomShape = RoundedCornerShape(16.dp)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(zoomShape)
+                    .background(AsDark)
+                    .border(1.dp, AsBlue.copy(alpha = 0.6f), zoomShape)
+                    .padding(14.dp)
+            ) {
+                Text(
+                    text = "🔍  Quick Zoom",
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "The picture moves slowly over its whole time on screen, always centred, so no black edge shows.",
+                    color = AsSoft,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
+                )
+                AsSliderRow(
+                    label = "Zoom depth",
+                    valueText = "${zoomDepth.toInt()}%",
+                    value = zoomDepth,
+                    range = ZOOM_MIN_PERCENT..ZOOM_MAX_PERCENT,
+                    steps = (ZOOM_MAX_PERCENT - ZOOM_MIN_PERCENT).toInt() - 1,
+                    onChange = { raw ->
+                        val snapped = Math.round(raw).toFloat()
+                            .coerceIn(ZOOM_MIN_PERCENT, ZOOM_MAX_PERCENT)
+                        if (snapped != zoomDepth) {
+                            zoomDepth = snapped
+                            onSettingsChange(
+                                settings.copy(
+                                    global = withDepth(settings.global, snapped),
+                                    perScene = settings.perScene.mapValues { withDepth(it.value, snapped) }
+                                )
+                            )
+                        }
+                    }
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AsButton(
+                        text = "Zoom in all",
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            onSettingsChange(
+                                settings.copy(
+                                    mode = AnimationMode.GLOBAL,
+                                    global = zoomConfig(AnimationType.ZOOM_IN, zoomDepth),
+                                    perScene = emptyMap()
+                                )
+                            )
+                            zoomNote = "Zoom in on all ${scenes.size} pictures."
+                            playKey += 1
+                        }
+                    )
+                    AsButton(
+                        text = "Zoom out all",
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            onSettingsChange(
+                                settings.copy(
+                                    mode = AnimationMode.GLOBAL,
+                                    global = zoomConfig(AnimationType.ZOOM_OUT, zoomDepth),
+                                    perScene = emptyMap()
+                                )
+                            )
+                            zoomNote = "Zoom out on all ${scenes.size} pictures."
+                            playKey += 1
+                        }
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AsButton(
+                        text = "Alternate",
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            val alternating = scenes.mapIndexed { position, scene ->
+                                scene.index to zoomConfig(
+                                    if (position % 2 == 0) AnimationType.ZOOM_IN else AnimationType.ZOOM_OUT,
+                                    zoomDepth
+                                )
+                            }.toMap()
+                            onSettingsChange(
+                                settings.copy(
+                                    mode = AnimationMode.PER_SCENE,
+                                    perScene = alternating
+                                )
+                            )
+                            zoomNote = "Zoom in, zoom out, zoom in... on ${scenes.size} pictures."
+                            playKey += 1
+                        }
+                    )
+                    AsButton(
+                        text = "Clear",
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            onSettingsChange(
+                                settings.copy(
+                                    mode = AnimationMode.GLOBAL,
+                                    global = settings.global.copy(type = AnimationType.NONE),
+                                    perScene = emptyMap()
+                                )
+                            )
+                            zoomNote = "All animations cleared."
+                        }
+                    )
+                }
+                val note = zoomNote
+                if (note != null) {
+                    Text(
+                        text = note,
+                        color = AsOk,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+                Text(
+                    text = "One picture only? Choose Per Scene above, tap the picture, then pick Zoom In or Zoom Out below.",
+                    color = AsSoft,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+                Text(
+                    text = "Zoom panel: Step 63",
+                    color = Color(0xFF6C85B8),
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
             Spacer(modifier = Modifier.height(14.dp))
 
             if (mode == AnimationMode.PER_SCENE) {
@@ -465,6 +629,7 @@ private fun AsSliderRow(
     valueText: String,
     value: Float,
     range: ClosedFloatingPointRange<Float>,
+    steps: Int = 0,
     onChange: (Float) -> Unit
 ) {
     Column(modifier = Modifier.padding(bottom = 10.dp)) {
@@ -489,6 +654,7 @@ private fun AsSliderRow(
             value = value.coerceIn(range.start, range.endInclusive),
             onValueChange = onChange,
             valueRange = range,
+            steps = steps,
             colors = SliderDefaults.colors(
                 thumbColor = AsBlue,
                 activeTrackColor = AsBlue,
