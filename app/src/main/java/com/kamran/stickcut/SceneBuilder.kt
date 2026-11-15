@@ -221,6 +221,170 @@ object SceneBuilder {
         return SceneBuildResult(numbered, emptyList(), totalMs)
     }
 
+    // ---------- Timestamp-only mode (no script) ----------
+
+    private const val MIN_SCENE_MS = 500L
+    private const val FALLBACK_LAST_MS = 3000L
+    private const val MAX_TRIM_MS = 1500L
+
+    data class TimestampPlan(
+        val ordered: List<ImportedImage>,
+        val durationsMs: List<Long>,
+        val imagesTotalMs: Long,
+        val voiceTotalMs: Long,
+        val notes: List<String>,
+        val error: String?
+    )
+
+    private fun secText(ms: Long): String {
+        return "${ms / 1000.0}s"
+    }
+
+    // True when EVERY image name carries a start time, like "324.0-326.4_x.jpg".
+    fun isTimestampOnly(images: List<ImportedImage>): Boolean {
+        if (images.isEmpty()) return false
+        return images.all { ImageFilenameParser.parse(it.name).startMs != null }
+    }
+
+    // Each image lasts as long as its file name says (end time minus start time).
+    // Without an end time it lasts until the next image's start time.
+    // The last image without an end time fills the rest of the voiceover.
+    // Images are shown one after another from 0, in start-time order.
+    fun planTimestampImages(images: List<ImportedImage>, voiceTotalMs: Long): TimestampPlan {
+        val parsed = images.map { ImageFilenameParser.parse(it.name) }
+        val order = images.indices.sortedWith(Comparator { a, b ->
+            val byTime = (parsed[a].startMs ?: 0L).compareTo(parsed[b].startMs ?: 0L)
+            if (byTime != 0) byTime else a.compareTo(b)
+        })
+        val notes = mutableListOf<String>()
+        val durations = LongArray(order.size)
+        val lastPos = order.size - 1
+
+        for (pos in order.indices) {
+            val p = parsed[order[pos]]
+            val start = p.startMs ?: 0L
+            val end = p.endMs
+            var d = when {
+                end != null -> end - start
+                pos < lastPos -> (parsed[order[pos + 1]].startMs ?: start) - start
+                else -> -1L
+            }
+            if (d == -1L) {
+                durations[pos] = -1L
+                continue
+            }
+            if (d < MIN_SCENE_MS) {
+                notes.add("${images[order[pos]].name}: the time is shorter than 0.5s, so 0.5s is used.")
+                d = MIN_SCENE_MS
+            }
+            durations[pos] = d
+        }
+
+        if (order.isEmpty()) {
+            return TimestampPlan(emptyList(), emptyList(), 0L, voiceTotalMs, notes, null)
+        }
+
+        if (durations[lastPos] == -1L) {
+            var knownSum = 0L
+            for (pos in 0 until lastPos) knownSum += durations[pos]
+            val rest = voiceTotalMs - knownSum
+            if (voiceTotalMs > 0L && rest >= MIN_SCENE_MS) {
+                durations[lastPos] = rest
+                notes.add("The last image has no end time, so it fills the rest of the voiceover.")
+            } else {
+                durations[lastPos] = FALLBACK_LAST_MS
+                notes.add("The last image has no end time, so ${secText(FALLBACK_LAST_MS)} is used.")
+            }
+        }
+
+        var total = 0L
+        for (d in durations) total += d
+        var error: String? = null
+
+        if (voiceTotalMs > 0L) {
+            if (total < voiceTotalMs) {
+                val extra = voiceTotalMs - total
+                durations[lastPos] = durations[lastPos] + extra
+                notes.add(
+                    "Image times add up to ${secText(total)} but the voiceover is ${secText(voiceTotalMs)}. " +
+                        "The last image is extended by ${secText(extra)} so the video ends with the voice."
+                )
+            } else if (total > voiceTotalMs) {
+                val over = total - voiceTotalMs
+                if (over > MAX_TRIM_MS || durations[lastPos] - over < MIN_SCENE_MS) {
+                    error = "Image times add up to ${secText(total)}, which is longer than the voiceover " +
+                        "(${secText(voiceTotalMs)}). Remove some images or add more voiceover."
+                } else {
+                    durations[lastPos] = durations[lastPos] - over
+                    notes.add("The last image is shortened by ${secText(over)} to end with the voiceover.")
+                }
+            }
+        }
+
+        return TimestampPlan(
+            ordered = order.map { images[it] },
+            durationsMs = durations.toList(),
+            imagesTotalMs = total,
+            voiceTotalMs = voiceTotalMs,
+            notes = notes,
+            error = error
+        )
+    }
+
+    // Builds the scenes without any script: image i lasts as the plan says.
+    fun buildFromTimestamps(
+        parts: List<VoicePartInfo>,
+        images: List<ImportedImage>
+    ): SceneBuildResult {
+        if (parts.isEmpty()) {
+            return SceneBuildResult(emptyList(), listOf("Import at least one voiceover part."), 0L)
+        }
+        if (images.isEmpty()) {
+            return SceneBuildResult(emptyList(), listOf("Import the images."), 0L)
+        }
+        val voiceTotal = parts.sumOf { it.durationMs }
+        val plan = planTimestampImages(images, voiceTotal)
+        val planError = plan.error
+        if (planError != null) {
+            return SceneBuildResult(emptyList(), listOf(planError), voiceTotal)
+        }
+
+        val partStart = LongArray(parts.size)
+        var running = 0L
+        parts.forEach { part ->
+            partStart[part.position] = running
+            running += part.durationMs
+        }
+
+        val scenes = mutableListOf<Scene>()
+        var t = 0L
+        for ((i, image) in plan.ordered.withIndex()) {
+            val start = t
+            val end = t + plan.durationsMs[i]
+            t = end
+            var partPosition = 0
+            parts.forEach { part ->
+                if (partStart[part.position] <= start) partPosition = part.position
+            }
+            scenes.add(
+                Scene(
+                    index = i + 1,
+                    imageNumber = (i + 1).toLong(),
+                    imageUri = image.uri,
+                    imageName = image.name,
+                    startMs = start,
+                    endMs = end,
+                    text = "",
+                    partPosition = partPosition
+                )
+            )
+        }
+        if (scenes.isNotEmpty() && scenes.last().endMs != voiceTotal) {
+            scenes[scenes.size - 1] = scenes.last().copy(endMs = voiceTotal)
+        }
+        return SceneBuildResult(scenes, emptyList(), voiceTotal)
+    }
+
     // The number each image answers to in the script ("Image N").
     // Timestamp names such as "324.0-326.4_x.jpg" are numbered 1, 2, 3... by start time
     // (equal times keep the import order). Other names keep the number found in the name.
