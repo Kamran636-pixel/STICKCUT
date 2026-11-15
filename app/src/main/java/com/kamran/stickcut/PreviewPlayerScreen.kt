@@ -35,16 +35,25 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import kotlin.math.hypot
 
 private val PvNavy = Color(0xFF050B1F)
 private val PvBlue = Color(0xFF2D8CFF)
@@ -59,35 +68,48 @@ object ProjectStore {
     var audios by mutableStateOf<List<ImportedAudio>>(emptyList())
 }
 
+// One cut that is currently blending: scene outIndex leaves, scene inIndex arrives.
+// q goes from 0 (start of the transition) to 1 (end).
 private data class Blend(
     val outIndex: Int,
     val inIndex: Int,
     val q: Float,
-    val type: TransitionType
+    val kind: CutTransitionKind
 )
 
 private data class LayerParams(
     val alpha: Float,
     val scale: Float,
-    val tx: Float
+    val tx: Float,
+    // Only for Wipe left/right and Circle open: the part of the picture that is shown.
+    val revealKind: CutTransitionKind? = null,
+    val revealQ: Float = 1f
 )
 
+// Which cut is blending right now? The transition is centred on the moment
+// the new scene starts. Kind and length come from the Transitions screen.
 private fun findBlend(
     scenes: List<Scene>,
-    planned: List<PlannedScene>,
+    keys: List<String>,
+    state: CutTransitionState,
     base: Int,
-    positionMs: Long,
-    type: TransitionType
+    positionMs: Long
 ): Blend? {
-    if (type == TransitionType.NONE) return null
     for (k in intArrayOf(base, base + 1)) {
         if (k < 1 || k >= scenes.size) continue
-        val length = planned[k].transitionInMs
+        val kind = CutTransitionEngine.kindAt(state, keys, k)
+        if (kind == CutTransitionKind.CUT) continue
+        val length = CutTransitionEngine.effectiveMs(
+            kind,
+            state.durationMs,
+            scenes[k - 1].durationMs,
+            scenes[k].durationMs
+        )
         if (length <= 0L) continue
         val windowStart = scenes[k].startMs - length / 2L
         if (positionMs >= windowStart && positionMs < windowStart + length) {
             val q = (positionMs - windowStart).toFloat() / length.toFloat()
-            return Blend(k - 1, k, q, type)
+            return Blend(k - 1, k, q, kind)
         }
     }
     return null
@@ -99,38 +121,78 @@ private fun layerParams(role: Int, isBase: Boolean, blend: Blend?): LayerParams 
         return LayerParams(if (isBase && blend == null) 1f else 0f, 1f, 0f)
     }
     val q = blend.q
-    return when (blend.type) {
-        TransitionType.FADE -> if (role == 1) {
-            LayerParams(if (q < 0.5f) 1f - 2f * q else 0f, 1f, 0f)
-        } else {
-            LayerParams(if (q >= 0.5f) 2f * q - 1f else 0f, 1f, 0f)
-        }
-
-        TransitionType.CROSS_DISSOLVE -> if (role == 1) {
+    return when (blend.kind) {
+        // Old picture stays, the new one fades in on top of it.
+        CutTransitionKind.FADE -> if (role == 1) {
             LayerParams(1f, 1f, 0f)
         } else {
             LayerParams(q, 1f, 0f)
         }
 
-        TransitionType.SLIDE_LEFT -> if (role == 1) {
+        // Old picture fades to black in the first half, new one appears in the second half.
+        CutTransitionKind.FADE_BLACK -> if (role == 1) {
+            LayerParams(if (q < 0.5f) 1f - 2f * q else 0f, 1f, 0f)
+        } else {
+            LayerParams(if (q >= 0.5f) 2f * q - 1f else 0f, 1f, 0f)
+        }
+
+        // Old picture stays, the new one is uncovered step by step.
+        CutTransitionKind.WIPE_LEFT,
+        CutTransitionKind.WIPE_RIGHT,
+        CutTransitionKind.CIRCLE_OPEN -> if (role == 1) {
+            LayerParams(1f, 1f, 0f)
+        } else {
+            LayerParams(1f, 1f, 0f, blend.kind, q)
+        }
+
+        CutTransitionKind.SLIDE_LEFT -> if (role == 1) {
             LayerParams(1f, 1f, -q)
         } else {
             LayerParams(1f, 1f, 1f - q)
         }
 
-        TransitionType.SLIDE_RIGHT -> if (role == 1) {
+        CutTransitionKind.SLIDE_RIGHT -> if (role == 1) {
             LayerParams(1f, 1f, q)
         } else {
             LayerParams(1f, 1f, -(1f - q))
         }
 
-        TransitionType.ZOOM -> if (role == 1) {
-            LayerParams(1f - q, 1f + 0.3f * q, 0f)
-        } else {
-            LayerParams(q, 0.85f + 0.15f * q, 0f)
-        }
+        CutTransitionKind.CUT -> LayerParams(if (isBase) 1f else 0f, 1f, 0f)
+    }
+}
 
-        TransitionType.NONE -> LayerParams(if (isBase) 1f else 0f, 1f, 0f)
+// The visible part of the arriving picture for Wipe and Circle open.
+private class RevealShape(
+    private val kind: CutTransitionKind,
+    private val progress: Float
+) : Shape {
+    override fun createOutline(
+        size: Size,
+        layoutDirection: LayoutDirection,
+        density: Density
+    ): Outline {
+        val w = size.width
+        val h = size.height
+        val p = progress.coerceIn(0f, 1f)
+        return when (kind) {
+            // New picture comes in from the right, moving left.
+            CutTransitionKind.WIPE_LEFT ->
+                Outline.Rectangle(Rect(w * (1f - p), 0f, w, h))
+
+            // New picture comes in from the left, moving right.
+            CutTransitionKind.WIPE_RIGHT ->
+                Outline.Rectangle(Rect(0f, 0f, w * p, h))
+
+            // A circle from the centre that grows until it covers the corners.
+            CutTransitionKind.CIRCLE_OPEN -> {
+                val radius = p * hypot(w / 2f, h / 2f)
+                val path = Path()
+                path.addOval(Rect(Offset(w / 2f, h / 2f), radius))
+                Outline.Generic(path)
+            }
+
+            else -> Outline.Rectangle(Rect(0f, 0f, w, h))
+        }
     }
 }
 
@@ -148,25 +210,37 @@ private fun SceneLayer(
             .size(1080)
             .build()
     }
-    AsyncImage(
-        model = request,
-        contentDescription = scene.imageName,
-        contentScale = ContentScale.Crop,
+    val revealKind = params.revealKind
+    val clipModifier = if (revealKind != null) {
+        Modifier.clip(RevealShape(revealKind, params.revealQ))
+    } else {
+        Modifier
+    }
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .graphicsLayer {
-                val t = AnimationEngine.transformAtTime(
-                    planned.config,
-                    planned,
-                    positionMs - scene.startMs
-                )
-                alpha = params.alpha
-                scaleX = t.scale * params.scale
-                scaleY = t.scale * params.scale
-                translationX = (t.offsetX + params.tx) * size.width
-                translationY = t.offsetY * size.height
-            }
-    )
+            .then(clipModifier)
+    ) {
+        AsyncImage(
+            model = request,
+            contentDescription = scene.imageName,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    val t = AnimationEngine.transformAtTime(
+                        planned.config,
+                        planned,
+                        positionMs - scene.startMs
+                    )
+                    alpha = params.alpha
+                    scaleX = t.scale * params.scale
+                    scaleY = t.scale * params.scale
+                    translationX = (t.offsetX + params.tx) * size.width
+                    translationY = t.offsetY * size.height
+                }
+        )
+    }
 }
 
 @Composable
@@ -189,6 +263,13 @@ fun PreviewPlayerScreen(
             running += audio.durationMs
             start
         }
+    }
+
+    // Transitions (per cut) and scene fades, set on the Transitions screen.
+    val cutState = CutTransitionStore.state
+    val fadeState = SceneFadeStore.state
+    val keys = remember(scenes) {
+        scenes.map { CutTransitionEngine.sceneKey(it.imageUri) }
     }
 
     var positionMs by remember { mutableStateOf(0L) }
@@ -240,6 +321,9 @@ fun PreviewPlayerScreen(
             }
             mp.prepare()
             mp.seekTo(offset.toInt())
+            // Voiceover fades in/out together with the picture.
+            val startGain = SceneFadeEngine.gainAt(SceneFadeStore.state, totalMs, target)
+            mp.setVolume(startGain, startGain)
             mp.start()
             player = mp
             currentPart = index
@@ -290,6 +374,8 @@ fun PreviewPlayerScreen(
                 if (p != null) {
                     try {
                         positionMs = (partStarts[currentPart] + p.currentPosition).coerceIn(0L, totalMs)
+                        val gain = SceneFadeEngine.gainAt(SceneFadeStore.state, totalMs, positionMs)
+                        p.setVolume(gain, gain)
                     } catch (e: Exception) {
                         // ignore one bad read
                     }
@@ -311,8 +397,10 @@ fun PreviewPlayerScreen(
     val blend = if (scenes.isEmpty()) {
         null
     } else {
-        findBlend(scenes, planned, baseIndex, positionMs, settings.transition.type)
+        findBlend(scenes, keys, cutState, baseIndex, positionMs)
     }
+    val currentCutKind = CutTransitionEngine.kindAt(cutState, keys, baseIndex)
+    val fadeGain = SceneFadeEngine.gainAt(fadeState, totalMs, positionMs)
 
     // Captions (Caption Studio settings). Built only when captions are ON.
     val captionStyle = CaptionStore.style
@@ -410,11 +498,25 @@ fun PreviewPlayerScreen(
                         )
                     }
                 }
+
+                // Scene fades: black over the whole frame at the start and the end.
+                if (fadeGain < 1f) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = (1f - fadeGain).coerceIn(0f, 1f)))
+                    )
+                }
             }
 
             if (currentScene != null) {
+                val cutText = if (currentCutKind != CutTransitionKind.CUT) {
+                    "  •  🔀 ${currentCutKind.label}"
+                } else {
+                    ""
+                }
                 Text(
-                    text = "Scene #${currentScene.index}  •  Image ${currentScene.imageNumber}  •  Part ${currentScene.partPosition + 1}  •  🎞 ${planned[baseIndex].config.type.label}",
+                    text = "Scene #${currentScene.index}  •  Image ${currentScene.imageNumber}  •  Part ${currentScene.partPosition + 1}  •  🎞 ${planned[baseIndex].config.type.label}$cutText",
                     color = PvBlue,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
@@ -427,6 +529,12 @@ fun PreviewPlayerScreen(
                     modifier = Modifier.padding(top = 4.dp)
                 )
             }
+            Text(
+                text = "Preview build: Step 65",
+                color = Color(0xFF6C85B8),
+                fontSize = 11.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
             Spacer(modifier = Modifier.height(8.dp))
 
             Slider(
