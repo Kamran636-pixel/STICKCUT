@@ -91,6 +91,14 @@ private fun captionSummary(style: CaptionStyle): String {
     }
 }
 
+private fun cutTransitionSummary(used: Int, cuts: Int, durationMs: Long): String {
+    return if (used == 0) {
+        "No transitions set"
+    } else {
+        "$used of $cuts cuts  •  ${String.format(Locale.US, "%.2fs", durationMs / 1000f)}"
+    }
+}
+
 @Composable
 fun SceneListScreen(
     result: SceneBuildResult,
@@ -104,13 +112,24 @@ fun SceneListScreen(
     var showExport by remember { mutableStateOf(false) }
     var showCaptions by remember { mutableStateOf(false) }
     var showPreview by remember { mutableStateOf(false) }
+    var showTransitions by remember { mutableStateOf(false) }
     var saveText by remember { mutableStateOf("") }
     val settings = AnimationStore.settings
     val captionStyle = CaptionStore.style
+    val cutState = CutTransitionStore.state
 
     val plannedByScene = remember(settings, current.scenes) {
         AnimationEngine.plan(current.scenes, settings).associateBy { it.sceneIndex }
     }
+
+    // Which transition arrives at each scene (key = scene.index).
+    val cutKindByScene = remember(cutState, current.scenes) {
+        val keys = current.scenes.map { CutTransitionEngine.sceneKey(it.imageUri) }
+        current.scenes.mapIndexed { position, scene ->
+            scene.index to CutTransitionEngine.kindAt(cutState, keys, position)
+        }.toMap()
+    }
+    val cutsUsed = cutKindByScene.values.count { it != CutTransitionKind.CUT }
 
     // Saves the project automatically (again after every settings change).
     LaunchedEffect(current, settings) {
@@ -125,8 +144,17 @@ fun SceneListScreen(
     }
 
     BackHandler(
-        enabled = !showAnimation && !showPreview && !showManual && !showExport && !showCaptions
+        enabled = !showAnimation && !showPreview && !showManual && !showExport &&
+            !showCaptions && !showTransitions
     ) { onClose() }
+
+    if (showTransitions) {
+        TransitionsScreen(
+            scenes = current.scenes,
+            onClose = { showTransitions = false }
+        )
+        return
+    }
 
     if (showCaptions) {
         CaptionStudioScreen(
@@ -259,6 +287,12 @@ fun SceneListScreen(
                         modifier = Modifier.padding(top = 4.dp)
                     )
                 }
+                Text(
+                    text = "Scene List build: Step 62",
+                    color = Color(0xFF6C85B8),
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
             }
 
             if (current.scenes.isNotEmpty()) {
@@ -334,6 +368,34 @@ fun SceneListScreen(
                 }
 
                 Spacer(modifier = Modifier.height(10.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(buttonShape)
+                        .background(SceneCard)
+                        .border(1.dp, SceneBlue.copy(alpha = 0.7f), buttonShape)
+                        .clickable { showTransitions = true }
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                ) {
+                    Text(
+                        text = "🔀  Transitions",
+                        color = Color.White,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = cutTransitionSummary(
+                            cutsUsed,
+                            (current.scenes.size - 1).coerceAtLeast(0),
+                            cutState.durationMs
+                        ),
+                        color = SceneSoft,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -380,6 +442,7 @@ fun SceneListScreen(
                 items(current.scenes, key = { it.index }) { scene ->
                     val shape = RoundedCornerShape(14.dp)
                     val planned = plannedByScene[scene.index]
+                    val cutKind = cutKindByScene[scene.index] ?: CutTransitionKind.CUT
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -420,6 +483,14 @@ fun SceneListScreen(
                             if (planned != null) {
                                 Text(
                                     text = "🎞 ${planned.config.type.label}",
+                                    color = SceneOk,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                            if (cutKind != CutTransitionKind.CUT) {
+                                Text(
+                                    text = "🔀 ${cutKind.label}",
                                     color = SceneOk,
                                     fontSize = 12.sp,
                                     modifier = Modifier.padding(top = 2.dp)
