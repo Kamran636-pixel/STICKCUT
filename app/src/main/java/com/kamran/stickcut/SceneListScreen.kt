@@ -117,6 +117,7 @@ fun SceneListScreen(
     val settings = AnimationStore.settings
     val captionStyle = CaptionStore.style
     val cutState = CutTransitionStore.state
+    val fadeState = SceneFadeStore.state
 
     val plannedByScene = remember(settings, current.scenes) {
         AnimationEngine.plan(current.scenes, settings).associateBy { it.sceneIndex }
@@ -131,11 +132,19 @@ fun SceneListScreen(
     }
     val cutsUsed = cutKindByScene.values.count { it != CutTransitionKind.CUT }
 
-    // Saves the project automatically (again after every settings change).
-    LaunchedEffect(current, settings) {
+    // Saves the project automatically (again after every settings change,
+    // including transitions and scene fades).
+    LaunchedEffect(current, settings, cutState, fadeState) {
         if (current.ok) {
             val saved = withContext(Dispatchers.IO) {
-                ProjectStorage.save(context, current, ProjectStore.audios, settings)
+                ProjectStorage.save(
+                    context,
+                    current,
+                    ProjectStore.audios,
+                    settings,
+                    cutState,
+                    fadeState
+                )
             }
             saveText = if (saved) "💾 Project saved" else "⚠ Could not save the project"
         } else {
@@ -288,7 +297,7 @@ fun SceneListScreen(
                     )
                 }
                 Text(
-                    text = "Scene List build: Step 62",
+                    text = "Scene List build: Step 66",
                     color = Color(0xFF6C85B8),
                     fontSize = 11.sp,
                     modifier = Modifier.padding(top = 4.dp)
