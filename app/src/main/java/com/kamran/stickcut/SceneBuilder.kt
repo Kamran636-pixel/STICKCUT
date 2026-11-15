@@ -72,8 +72,9 @@ object SceneBuilder {
         // Each image number must belong to exactly one imported image.
         val imageByNumber = mutableMapOf<Long, ImportedImage>()
         val duplicateNumbers = mutableSetOf<Long>()
-        images.forEach { image ->
-            val number = imageNumberOf(image.name)
+        val effectiveNumbers = imageNumbers(images)
+        images.forEachIndexed { imageIndex, image ->
+            val number = effectiveNumbers[imageIndex]
             if (number != null) {
                 if (imageByNumber.containsKey(number)) {
                     duplicateNumbers.add(number)
@@ -218,6 +219,25 @@ object SceneBuilder {
 
         val numbered = fixed.mapIndexed { index, scene -> scene.copy(index = index + 1) }
         return SceneBuildResult(numbered, emptyList(), totalMs)
+    }
+
+    // The number each image answers to in the script ("Image N").
+    // Timestamp names such as "324.0-326.4_x.jpg" are numbered 1, 2, 3... by start time
+    // (equal times keep the import order). Other names keep the number found in the name.
+    // The result has the same order and size as the input list.
+    fun imageNumbers(images: List<ImportedImage>): List<Long?> {
+        val parsed = images.map { ImageFilenameParser.parse(it.name) }
+        val stamped = parsed.indices
+            .filter { parsed[it].startMs != null }
+            .sortedWith(Comparator { a, b ->
+                val byTime = (parsed[a].startMs ?: 0L).compareTo(parsed[b].startMs ?: 0L)
+                if (byTime != 0) byTime else a.compareTo(b)
+            })
+        val rankOf = HashMap<Int, Long>()
+        stamped.forEachIndexed { rank, imageIndex -> rankOf[imageIndex] = (rank + 1).toLong() }
+        return parsed.indices.map { i ->
+            if (parsed[i].startMs != null) rankOf[i] else parsed[i].sequenceNumber
+        }
     }
 
     private val keywordRegex = Regex(
