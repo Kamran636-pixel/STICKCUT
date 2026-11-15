@@ -92,6 +92,32 @@ private val resolutionOptions = listOf(
 
 private val fpsOptions = listOf(24, 30, 60, 90)
 
+// Writes an error as: full class name, message, and the first lines of the stack.
+// It follows the "caused by" chain, so a hidden cause is never lost.
+private fun describeError(error: Throwable): String {
+    val text = StringBuilder()
+    var current: Throwable? = error
+    var depth = 0
+    while (current != null && depth < 4) {
+        if (depth > 0) text.append("\nCaused by: ")
+        text.append(current.javaClass.name)
+        val detail = current.message
+        if (!detail.isNullOrBlank()) {
+            text.append(": ").append(detail)
+        } else {
+            text.append(" (no message)")
+        }
+        val frames = current.stackTrace
+        val shown = minOf(3, frames.size)
+        for (i in 0 until shown) {
+            text.append("\n   at ").append(frames[i].toString())
+        }
+        current = current.cause
+        depth++
+    }
+    return text.toString()
+}
+
 // Video bitrate in bits per second for a size and frame rate.
 private fun targetBitrate(width: Int, height: Int, fps: Int): Int {
     val pixels = width.toLong() * height.toLong()
@@ -334,7 +360,7 @@ fun ExportScreen(
             )
         } catch (e: Exception) {
             status = ExportStatus.FAILED
-            message = "Could not prepare the export: ${e.message ?: "unknown error"}"
+            message = "Could not prepare the export (${scenes.size} scenes):\n" + describeError(e)
             return
         }
 
@@ -362,10 +388,9 @@ fun ExportScreen(
             ) {
                 transformer = null
                 status = ExportStatus.FAILED
-                message = "Export failed at ${resolution.label} / $fps fps: " +
-                    "${exportException.message ?: "unknown error"} " +
-                    "(code ${exportException.errorCodeName}). " +
-                    "Your phone may not support this setting. Try a lower one."
+                message = "Export failed at ${resolution.label} / $fps fps " +
+                    "(code ${exportException.errorCodeName}).\n" +
+                    describeError(exportException)
             }
         }
 
@@ -391,7 +416,7 @@ fun ExportScreen(
         } catch (e: Exception) {
             transformer = null
             status = ExportStatus.FAILED
-            message = "Could not start the export: ${e.message ?: "unknown error"}"
+            message = "Could not start the export (${scenes.size} scenes):\n" + describeError(e)
         }
     }
 
@@ -525,6 +550,12 @@ fun ExportScreen(
                     fontSize = 12.sp,
                     modifier = Modifier.padding(top = 8.dp)
                 )
+                Text(
+                    text = "Export build: Step 58",
+                    color = Color(0xFF6C85B8),
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
             }
             Spacer(modifier = Modifier.height(16.dp))
 
@@ -591,7 +622,7 @@ fun ExportScreen(
                         ExportStatus.FAILED -> ExErr
                         else -> ExSoft
                     },
-                    fontSize = 14.sp,
+                    fontSize = if (status == ExportStatus.FAILED) 12.sp else 14.sp,
                     modifier = Modifier.padding(top = 12.dp)
                 )
             }
