@@ -314,6 +314,21 @@ fun PreviewPlayerScreen(
         findBlend(scenes, planned, baseIndex, positionMs, settings.transition.type)
     }
 
+    // Captions (Caption Studio settings). Built only when captions are ON.
+    val captionStyle = CaptionStore.style
+    val captionChunks = remember(
+        scenes,
+        captionStyle.enabled,
+        captionStyle.maxWords,
+        captionStyle.maxChars
+    ) {
+        if (captionStyle.enabled) {
+            CaptionEngine.build(scenes, captionStyle).chunks
+        } else {
+            emptyList()
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -380,6 +395,18 @@ fun PreviewPlayerScreen(
                             planned = planned[index],
                             positionMs = positionMs,
                             params = layerParams(role, index == baseIndex, blend)
+                        )
+                    }
+                }
+
+                if (scenes.isNotEmpty() && captionStyle.enabled) {
+                    val chunk = CaptionEngine.chunkAt(captionChunks, positionMs)
+                    if (chunk != null) {
+                        CaptionOverlay(
+                            chunk = chunk,
+                            style = captionStyle,
+                            localMs = positionMs - chunk.startMs,
+                            modifier = Modifier.fillMaxSize()
                         )
                     }
                 }
@@ -492,6 +519,18 @@ fun PreviewPlayerScreen(
             if (!hasAudio) {
                 Text(
                     text = "No voiceover available here, so the preview plays silently.",
+                    color = PvWarn,
+                    fontSize = 12.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                )
+            }
+            if (captionStyle.enabled && captionChunks.isEmpty()) {
+                Text(
+                    text = "Captions are ON, but no scene has narration text, so there is nothing to show. " +
+                        "Captions need a script.",
                     color = PvWarn,
                     fontSize = 12.sp,
                     textAlign = TextAlign.Center,
