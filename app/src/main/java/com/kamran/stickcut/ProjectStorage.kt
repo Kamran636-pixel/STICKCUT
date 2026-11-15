@@ -14,7 +14,10 @@ data class SavedProject(
     val totalMs: Long,
     val savedAtMs: Long,
     // Names of image or voiceover files that can no longer be opened.
-    val missingFiles: List<String>
+    val missingFiles: List<String>,
+    // Per-cut transitions and scene fades (older project files have none: defaults).
+    val cutTransitions: CutTransitionState = CutTransitionState(),
+    val sceneFades: SceneFadeState = SceneFadeState()
 )
 
 object ProjectStorage {
@@ -116,12 +119,79 @@ object ProjectStorage {
         )
     }
 
+    // Per-cut transitions. The key of each cut is its picture (see CutTransitionEngine.sceneKey).
+    private fun cutsToJson(cuts: CutTransitionState): JSONObject {
+        val perCut = JSONArray()
+        cuts.perCut.forEach { (key, kind) ->
+            perCut.put(
+                JSONObject()
+                    .put("key", key)
+                    .put("kind", kind.id)
+            )
+        }
+        val pool = JSONArray()
+        cuts.randomPool.forEach { pool.put(it.id) }
+        return JSONObject()
+            .put("durationMs", cuts.durationMs)
+            .put("randomMix", cuts.randomMix)
+            .put("pool", pool)
+            .put("perCut", perCut)
+    }
+
+    private fun cutsFromJson(json: JSONObject?): CutTransitionState {
+        val base = CutTransitionState()
+        if (json == null) return base
+        val perCut = mutableMapOf<String, CutTransitionKind>()
+        val perCutArray = json.optJSONArray("perCut")
+        if (perCutArray != null) {
+            for (i in 0 until perCutArray.length()) {
+                val item = perCutArray.optJSONObject(i) ?: continue
+                val key = item.optString("key", "")
+                val kind = CutTransitionKind.fromId(item.optString("kind", ""))
+                // An unknown id is skipped (that cut falls back to "None").
+                if (key.isNotBlank() && kind != null) perCut[key] = kind
+            }
+        }
+        val pool = mutableSetOf<CutTransitionKind>()
+        val poolArray = json.optJSONArray("pool")
+        if (poolArray != null) {
+            for (i in 0 until poolArray.length()) {
+                val kind = CutTransitionKind.fromId(poolArray.optString(i, ""))
+                if (kind != null) pool.add(kind)
+            }
+        }
+        return CutTransitionState(
+            perCut = perCut,
+            durationMs = CutTransitionEngine.snapDuration(
+                json.optLong("durationMs", base.durationMs)
+            ),
+            randomMix = json.optBoolean("randomMix", base.randomMix),
+            randomPool = if (json.has("pool")) pool else base.randomPool
+        )
+    }
+
+    private fun fadesToJson(fades: SceneFadeState): JSONObject {
+        return JSONObject()
+            .put("fadeInMs", fades.fadeInMs)
+            .put("fadeOutMs", fades.fadeOutMs)
+    }
+
+    private fun fadesFromJson(json: JSONObject?): SceneFadeState {
+        if (json == null) return SceneFadeState()
+        return SceneFadeState(
+            fadeInMs = SceneFadeEngine.snap(json.optLong("fadeInMs", 0L)),
+            fadeOutMs = SceneFadeEngine.snap(json.optLong("fadeOutMs", 0L))
+        )
+    }
+
     // Returns true only when the file was really written.
     fun save(
         context: Context,
         result: SceneBuildResult,
         audios: List<ImportedAudio>,
-        settings: AnimationSettings
+        settings: AnimationSettings,
+        cuts: CutTransitionState = CutTransitionStore.state,
+        fades: SceneFadeState = SceneFadeStore.state
     ): Boolean {
         if (result.scenes.isEmpty()) return false
         return try {
@@ -155,6 +225,8 @@ object ProjectStorage {
                 .put("scenes", scenes)
                 .put("audios", audioArray)
                 .put("settings", settingsToJson(settings))
+                .put("cuts", cutsToJson(cuts))
+                .put("fades", fadesToJson(fades))
 
             val temp = File(context.filesDir, TEMP_NAME)
             temp.writeText(root.toString(), Charsets.UTF_8)
@@ -182,6 +254,8 @@ object ProjectStorage {
 
     // Reads the saved project. Returns null when nothing is saved or the file is damaged.
     // Call this away from the main thread because it opens every file once to check it.
+    // When every file is still there, the saved transitions and fades are also put
+    // back into CutTransitionStore and SceneFadeStore, so the project opens complete.
     fun load(context: Context): SavedProject? {
         val file = projectFile(context)
         if (!file.exists()) return null
@@ -225,6 +299,8 @@ object ProjectStorage {
 
             val settingsJson = root.optJSONObject("settings")
             val settings = if (settingsJson != null) settingsFromJson(settingsJson) else AnimationSettings()
+            val cuts = cutsFromJson(root.optJSONObject("cuts"))
+            val fades = fadesFromJson(root.optJSONObject("fades"))
 
             val missing = mutableListOf<String>()
             val checkedImages = mutableSetOf<String>()
@@ -238,13 +314,20 @@ object ProjectStorage {
                 if (!canOpen(context, audio.uri)) missing.add(audio.name)
             }
 
+            if (missing.isEmpty()) {
+                CutTransitionStore.state = cuts
+                SceneFadeStore.state = fades
+            }
+
             SavedProject(
                 scenes = scenes,
                 audios = audios,
                 settings = settings,
                 totalMs = root.optLong("totalMs", scenes.last().endMs),
                 savedAtMs = root.optLong("savedAtMs", 0L),
-                missingFiles = missing
+                missingFiles = missing,
+                cutTransitions = cuts,
+                sceneFades = fades
             )
         } catch (e: Exception) {
             null
