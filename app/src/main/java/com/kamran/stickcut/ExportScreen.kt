@@ -326,6 +326,7 @@ fun ExportScreen(
 
     var status by remember { mutableStateOf(ExportStatus.IDLE) }
     var progress by remember { mutableStateOf(0) }
+    var stage by remember { mutableStateOf("") }
     var message by remember { mutableStateOf<String?>(null) }
     var timingNote by remember { mutableStateOf<String?>(null) }
     var transformer by remember { mutableStateOf<Transformer?>(null) }
@@ -385,6 +386,7 @@ fun ExportScreen(
         if (running || scenes.isEmpty()) return
         message = null
         timingNote = null
+        stage = ""
         progress = 0
         val folder = File(context.cacheDir, "export")
         folder.mkdirs()
@@ -466,17 +468,21 @@ fun ExportScreen(
     }
 
     // The own renderer: draws every frame itself, so transitions and scene
-    // fades really appear in the video. No sound yet.
+    // fades really appear in the video. Then the voiceover (with its fades)
+    // is joined to the picture.
     fun startOwnRender() {
         if (running || scenes.isEmpty()) return
         message = null
         timingNote = null
         progress = 0
+        stage = "Drawing the video"
         val folder = File(context.cacheDir, "export")
         folder.mkdirs()
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val name = "StickCut_${resolution.label}_${fps}fps_${stamp}_nosound.mp4"
-        val file = File(folder, name)
+        val name = "StickCut_${resolution.label}_${fps}fps_${stamp}_full.mp4"
+        val videoFile = File(folder, "tmp_video_$stamp.mp4")
+        val voiceFile = File(folder, "tmp_voice_$stamp.mp4")
+        val finalFile = File(folder, name)
 
         val width = resolution.width
         val height = resolution.height
@@ -485,10 +491,22 @@ fun ExportScreen(
         val animation = AnimationStore.settings
         val cuts = CutTransitionStore.state
         val fades = SceneFadeStore.state
+        val voices = audios
+        val videoTotalMs = totalMs
 
         renderCancel.set(false)
         status = ExportStatus.RUNNING
         scope.launch(Dispatchers.Default) {
+            fun cleanUp() {
+                try {
+                    videoFile.delete()
+                    voiceFile.delete()
+                    finalFile.delete()
+                } catch (e: Exception) {
+                    // ignore
+                }
+            }
+
             val composer = FrameComposer(context, scenes, animation, cuts, fades, width, height)
             val result = try {
                 VideoRenderer.render(
@@ -497,7 +515,7 @@ fun ExportScreen(
                     height,
                     chosenFps,
                     chosenBitrate,
-                    file,
+                    videoFile,
                     { percent -> progress = percent },
                     { renderCancel.get() }
                 )
@@ -507,22 +525,70 @@ fun ExportScreen(
             composer.release()
 
             if (result.cancelled) {
+                cleanUp()
                 status = ExportStatus.IDLE
                 message = "Render cancelled."
-            } else if (!result.ok) {
+                return@launch
+            }
+            if (!result.ok) {
+                cleanUp()
                 status = ExportStatus.FAILED
                 message = result.message ?: "The render failed."
-            } else {
+                return@launch
+            }
+
+            // Sound: voiceover parts joined, with the fade in / fade out.
+            var fileToSave = videoFile
+            var savedName = name
+            var soundNote = ""
+            if (voices.isNotEmpty()) {
+                stage = "Preparing the voiceover"
                 progress = 100
-                status = ExportStatus.SAVING
-                val place = withContext(Dispatchers.IO) { saveToMovies(context, file, name) }
-                if (place != null) {
-                    status = ExportStatus.DONE
-                    message = "Saved (no sound yet): $place"
-                } else {
-                    status = ExportStatus.FAILED
-                    message = "The video was made but could not be saved to Movies."
+                val voiceError = try {
+                    AudioMixer.exportVoiceover(
+                        context, voices, fades, videoTotalMs, voiceFile
+                    ) { renderCancel.get() }
+                } catch (e: Throwable) {
+                    "Voiceover failed:\n" + describeError(e)
                 }
+                if (voiceError == AudioMixer.CANCELLED) {
+                    cleanUp()
+                    status = ExportStatus.IDLE
+                    message = "Render cancelled."
+                    return@launch
+                }
+                if (voiceError != null) {
+                    cleanUp()
+                    status = ExportStatus.FAILED
+                    message = voiceError
+                    return@launch
+                }
+
+                stage = "Joining sound and video"
+                val mergeError = withContext(Dispatchers.IO) {
+                    MediaMerger.merge(videoFile, voiceFile, finalFile)
+                }
+                if (mergeError != null) {
+                    cleanUp()
+                    status = ExportStatus.FAILED
+                    message = mergeError
+                    return@launch
+                }
+                fileToSave = finalFile
+            } else {
+                savedName = "StickCut_${resolution.label}_${chosenFps}fps_${stamp}_nosound.mp4"
+                soundNote = " (no voiceover was loaded, so no sound)"
+            }
+
+            status = ExportStatus.SAVING
+            val place = withContext(Dispatchers.IO) { saveToMovies(context, fileToSave, savedName) }
+            cleanUp()
+            if (place != null) {
+                status = ExportStatus.DONE
+                message = "Saved to: $place$soundNote"
+            } else {
+                status = ExportStatus.FAILED
+                message = "The video was made but could not be saved to Movies."
             }
         }
     }
@@ -652,19 +718,19 @@ fun ExportScreen(
                     )
                 }
                 Text(
-                    text = "▶ Start Export: with sound and zoom, but no transitions or fades.",
+                    text = "▶ Start Export: sound and zoom, but no transitions or fades.",
                     color = ExWarn,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(top = 8.dp)
                 )
                 Text(
-                    text = "🧪 Render: with zoom, transitions and fades, but NO sound yet (test version). Captions are not in either.",
+                    text = "🧪 Render: zoom, transitions, scene fades and sound. Captions are not in either yet.",
                     color = ExWarn,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(top = 4.dp)
                 )
                 Text(
-                    text = "Export build: Step 70",
+                    text = "Export build: Step 71",
                     color = Color(0xFF6C85B8),
                     fontSize = 11.sp,
                     modifier = Modifier.padding(top = 6.dp)
@@ -689,10 +755,12 @@ fun ExportScreen(
                     trackColor = Color(0xFF14264D)
                 )
                 Text(
-                    text = if (status == ExportStatus.SAVING) {
-                        "Saving to your phone..."
-                    } else {
-                        "Exporting... $progress%  (keep the app open)"
+                    text = when {
+                        status == ExportStatus.SAVING -> "Saving to your phone..."
+                        stage.isNotEmpty() && stage != "Drawing the video" ->
+                            "$stage...  (keep the app open)"
+                        stage.isNotEmpty() -> "$stage... $progress%  (keep the app open)"
+                        else -> "Exporting... $progress%  (keep the app open)"
                     },
                     color = Color.White,
                     fontSize = 14.sp,
@@ -730,7 +798,7 @@ fun ExportScreen(
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 ExButton(
-                    text = "🧪  Render with transitions (no sound yet)",
+                    text = "🧪  Render with transitions + sound",
                     modifier = Modifier.fillMaxWidth(),
                     onClick = { startOwnRender() }
                 )
