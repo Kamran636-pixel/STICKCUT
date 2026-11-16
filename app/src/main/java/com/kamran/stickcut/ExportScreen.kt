@@ -70,6 +70,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 private val ExNavy = Color(0xFF050B1F)
 private val ExBlue = Color(0xFF2D8CFF)
@@ -330,6 +331,8 @@ fun ExportScreen(
     var transformer by remember { mutableStateOf<Transformer?>(null) }
     var resolutionIndex by remember { mutableStateOf(0) }
     var fps by remember { mutableStateOf(30) }
+    // Set to true to stop the own renderer (the 🧪 button).
+    val renderCancel = remember { AtomicBoolean(false) }
 
     val running = status == ExportStatus.RUNNING || status == ExportStatus.SAVING
     val totalMs = scenes.lastOrNull()?.endMs ?: 0L
@@ -356,7 +359,10 @@ fun ExportScreen(
     }
 
     fun leave() {
-        if (status == ExportStatus.RUNNING) cancelExport()
+        if (status == ExportStatus.RUNNING) {
+            renderCancel.set(true)
+            cancelExport()
+        }
         onClose()
     }
 
@@ -456,6 +462,68 @@ fun ExportScreen(
             transformer = null
             status = ExportStatus.FAILED
             message = "Could not start the export (${scenes.size} scenes):\n" + describeError(e)
+        }
+    }
+
+    // The own renderer: draws every frame itself, so transitions and scene
+    // fades really appear in the video. No sound yet.
+    fun startOwnRender() {
+        if (running || scenes.isEmpty()) return
+        message = null
+        timingNote = null
+        progress = 0
+        val folder = File(context.cacheDir, "export")
+        folder.mkdirs()
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val name = "StickCut_${resolution.label}_${fps}fps_${stamp}_nosound.mp4"
+        val file = File(folder, name)
+
+        val width = resolution.width
+        val height = resolution.height
+        val chosenFps = fps
+        val chosenBitrate = clampBitrate(bitrate)
+        val animation = AnimationStore.settings
+        val cuts = CutTransitionStore.state
+        val fades = SceneFadeStore.state
+
+        renderCancel.set(false)
+        status = ExportStatus.RUNNING
+        scope.launch(Dispatchers.Default) {
+            val composer = FrameComposer(context, scenes, animation, cuts, fades, width, height)
+            val result = try {
+                VideoRenderer.render(
+                    composer,
+                    width,
+                    height,
+                    chosenFps,
+                    chosenBitrate,
+                    file,
+                    { percent -> progress = percent },
+                    { renderCancel.get() }
+                )
+            } catch (e: Throwable) {
+                VideoRenderer.Result(false, false, "Video render failed:\n" + describeError(e))
+            }
+            composer.release()
+
+            if (result.cancelled) {
+                status = ExportStatus.IDLE
+                message = "Render cancelled."
+            } else if (!result.ok) {
+                status = ExportStatus.FAILED
+                message = result.message ?: "The render failed."
+            } else {
+                progress = 100
+                status = ExportStatus.SAVING
+                val place = withContext(Dispatchers.IO) { saveToMovies(context, file, name) }
+                if (place != null) {
+                    status = ExportStatus.DONE
+                    message = "Saved (no sound yet): $place"
+                } else {
+                    status = ExportStatus.FAILED
+                    message = "The video was made but could not be saved to Movies."
+                }
+            }
         }
     }
 
@@ -584,13 +652,19 @@ fun ExportScreen(
                     )
                 }
                 Text(
-                    text = "Not in the exported video yet: scene transitions, scene fades and captions (they work in the preview).",
+                    text = "▶ Start Export: with sound and zoom, but no transitions or fades.",
                     color = ExWarn,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(top = 8.dp)
                 )
                 Text(
-                    text = "Export build: Step 67",
+                    text = "🧪 Render: with zoom, transitions and fades, but NO sound yet (test version). Captions are not in either.",
+                    color = ExWarn,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+                Text(
+                    text = "Export build: Step 70",
                     color = Color(0xFF6C85B8),
                     fontSize = 11.sp,
                     modifier = Modifier.padding(top = 6.dp)
@@ -633,9 +707,13 @@ fun ExportScreen(
                         text = "Cancel export",
                         modifier = Modifier.fillMaxWidth(),
                         onClick = {
+                            val wasTransformer = transformer != null
+                            renderCancel.set(true)
                             cancelExport()
-                            status = ExportStatus.IDLE
-                            message = "Export cancelled."
+                            if (wasTransformer) {
+                                status = ExportStatus.IDLE
+                                message = "Export cancelled."
+                            }
                         }
                     )
                 }
@@ -649,6 +727,12 @@ fun ExportScreen(
                     modifier = Modifier.fillMaxWidth(),
                     filled = true,
                     onClick = { startExport() }
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                ExButton(
+                    text = "🧪  Render with transitions (no sound yet)",
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { startOwnRender() }
                 )
             }
 
