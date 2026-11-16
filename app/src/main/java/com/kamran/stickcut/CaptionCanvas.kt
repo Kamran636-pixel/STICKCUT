@@ -15,12 +15,12 @@ import java.io.File
 // Draws the captions on a video frame (used by the exporter).
 // It uses the same maths as the preview: CaptionEngine and CaptionAnimator.
 class CaptionCanvas(
-    style: CaptionStyle,
+    captionStyle: CaptionStyle,
     scenes: List<Scene>,
     private val width: Int,
     private val height: Int
 ) {
-    private val s = style.normalized()
+    private val s = captionStyle.normalized()
     private val chunks: List<CaptionChunk> =
         if (s.enabled) CaptionEngine.build(scenes, s).chunks else emptyList()
 
@@ -29,16 +29,16 @@ class CaptionCanvas(
     private val textSizePx = height * s.sizePercent / 100f
     private val outlinePx = textSizePx * s.outlineWidth * 2f
     private val boxPad = textSizePx * 0.25f
-    private val typeface = makeTypeface()
+    private val chosenTypeface: Typeface = makeTypeface()
 
     private val fillPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         textSize = textSizePx
-        typeface = this@CaptionCanvas.typeface
+        typeface = chosenTypeface
         color = s.textColor.toInt()
     }
     private val strokePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         textSize = textSizePx
-        typeface = this@CaptionCanvas.typeface
+        typeface = chosenTypeface
         style = Paint.Style.STROKE
         strokeWidth = outlinePx
         strokeJoin = Paint.Join.ROUND
