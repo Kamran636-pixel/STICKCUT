@@ -38,7 +38,9 @@ enum class TransitionType(val label: String) {
 
 data class AnimationConfig(
     val type: AnimationType = AnimationType.KEN_BURNS,
-    val durationMs: Long = 2000L,
+    // By default the movement lasts as long as the picture is on screen
+    // (up to 10 seconds). A shorter value makes it stop earlier.
+    val durationMs: Long = 10_000L,
     val speed: SpeedPreset = SpeedPreset.NORMAL,
     val intensity: Float = 1.0f
 ) {
@@ -51,7 +53,8 @@ data class AnimationConfig(
     companion object {
         const val MIN_DURATION_MS = 500L
         const val MAX_DURATION_MS = 10_000L
-        const val MIN_INTENSITY = 0.5f
+        // 0.1 means a 1.5% zoom, so a 2% depth is possible.
+        const val MIN_INTENSITY = 0.1f
         const val MAX_INTENSITY = 2.0f
     }
 }
@@ -113,18 +116,18 @@ object AnimationEngine {
     private const val SLOW_FACTOR = 0.5f
     private const val MAX_TRANSITION_SHARE = 0.8f
 
-    private fun ease(progress: Float): Float {
-        val p = progress.coerceIn(0f, 1f)
-        return p * p * (3f - 2f * p)
-    }
+    // The movement runs at an even speed from the very first frame,
+    // so it is visible at once and never "starts late".
+    private fun linear(progress: Float): Float = progress.coerceIn(0f, 1f)
 
     // The core calculation, shared by the preview and the exporter.
     // progress: 0 = start of the movement, 1 = end of the movement.
-    // The picture is always kept larger than the frame, so no edge
-    // and no black area can ever show.
+    // Zoom In, Zoom Out and Ken Burns use the picture's real size (scale 1.0)
+    // at one end. Pans keep the picture a little larger than the frame
+    // because they need room to slide. No edge and no black area ever shows.
     fun transformAt(config: AnimationConfig, progress: Float): AnimTransform {
         val c = config.normalized()
-        val e = ease(progress)
+        val e = linear(progress)
         val slow = c.type == AnimationType.SLOW_ZOOM_IN || c.type == AnimationType.SLOW_ZOOM_OUT
         val amount = BASE_ZOOM * c.intensity * (if (slow) SLOW_FACTOR else 1f)
         val margin = PAN_MARGIN * c.intensity
@@ -150,10 +153,13 @@ object AnimationEngine {
             AnimationType.PAN_DOWN ->
                 AnimTransform(1f + margin, 0f, -maxShift * sweep)
 
+            // Starts at the picture's real size, grows slowly and drifts a little.
+            // The drift is always smaller than the room the zoom creates,
+            // so no edge can show.
             AnimationType.KEN_BURNS -> {
-                val scale = 1f + amount * (0.6f + 0.8f * e)
-                val drift = amount * 0.3f
-                AnimTransform(scale, drift * sweep, drift * sweep * 0.5f)
+                val scale = 1f + amount * e
+                val room = (scale - 1f) / 2f
+                AnimTransform(scale, room * 0.5f, room * 0.25f)
             }
 
             AnimationType.NONE -> AnimTransform.IDENTITY
