@@ -312,6 +312,14 @@ private fun timingReport(scenes: List<Scene>): String {
     }
 }
 
+// 75000 ms -> "1m 15s"
+private fun durationText(ms: Long): String {
+    val seconds = ms / 1000L
+    val minutes = seconds / 60L
+    val rest = seconds % 60L
+    return if (minutes > 0L) "${minutes}m ${rest}s" else "${rest}s"
+}
+
 @OptIn(UnstableApi::class)
 @Composable
 fun ExportScreen(
@@ -468,8 +476,9 @@ fun ExportScreen(
     }
 
     // The own renderer: draws every frame itself, so transitions and scene
-    // fades really appear in the video. Then the voiceover (with its fades)
-    // is joined to the picture.
+    // fades really appear in the video. Then the voiceover is joined to the
+    // picture. Without fades the sound is copied as it is (fast); with fades
+    // the sound has to be re-encoded (slower).
     fun startOwnRender() {
         if (running || scenes.isEmpty()) return
         message = null
@@ -507,6 +516,7 @@ fun ExportScreen(
                 }
             }
 
+            val startedAt = System.currentTimeMillis()
             val composer = FrameComposer(context, scenes, animation, cuts, fades, width, height)
             val result = try {
                 VideoRenderer.render(
@@ -523,6 +533,7 @@ fun ExportScreen(
                 VideoRenderer.Result(false, false, "Video render failed:\n" + describeError(e))
             }
             composer.release()
+            val drawMs = System.currentTimeMillis() - startedAt
 
             if (result.cancelled) {
                 cleanUp()
@@ -537,37 +548,52 @@ fun ExportScreen(
                 return@launch
             }
 
-            // Sound: voiceover parts joined, with the fade in / fade out.
             var fileToSave = videoFile
             var savedName = name
             var soundNote = ""
+            var soundMs = 0L
+            var joinMs = 0L
+            var soundWay = ""
             if (voices.isNotEmpty()) {
-                stage = "Preparing the voiceover"
                 progress = 100
-                val voiceError = try {
-                    AudioMixer.exportVoiceover(
-                        context, voices, fades, videoTotalMs, voiceFile
-                    ) { renderCancel.get() }
-                } catch (e: Throwable) {
-                    "Voiceover failed:\n" + describeError(e)
+                val soundStart = System.currentTimeMillis()
+                val direct = FastAudio.canCopyDirectly(context, voices, fades, videoTotalMs)
+
+                if (!direct) {
+                    stage = "Preparing the voiceover (fades need re-encoding, this takes a while)"
+                    val voiceError = try {
+                        AudioMixer.exportVoiceover(
+                            context, voices, fades, videoTotalMs, voiceFile
+                        ) { renderCancel.get() }
+                    } catch (e: Throwable) {
+                        "Voiceover failed:\n" + describeError(e)
+                    }
+                    if (voiceError == AudioMixer.CANCELLED) {
+                        cleanUp()
+                        status = ExportStatus.IDLE
+                        message = "Render cancelled."
+                        return@launch
+                    }
+                    if (voiceError != null) {
+                        cleanUp()
+                        status = ExportStatus.FAILED
+                        message = voiceError
+                        return@launch
+                    }
                 }
-                if (voiceError == AudioMixer.CANCELLED) {
-                    cleanUp()
-                    status = ExportStatus.IDLE
-                    message = "Render cancelled."
-                    return@launch
-                }
-                if (voiceError != null) {
-                    cleanUp()
-                    status = ExportStatus.FAILED
-                    message = voiceError
-                    return@launch
-                }
+                soundMs = System.currentTimeMillis() - soundStart
+                soundWay = if (direct) "copied as it is" else "re-encoded"
 
                 stage = "Joining sound and video"
+                val joinStart = System.currentTimeMillis()
                 val mergeError = withContext(Dispatchers.IO) {
-                    MediaMerger.merge(videoFile, voiceFile, finalFile)
+                    if (direct) {
+                        FastAudio.merge(context, videoFile, voices[0].uri, finalFile)
+                    } else {
+                        MediaMerger.merge(videoFile, voiceFile, finalFile)
+                    }
                 }
+                joinMs = System.currentTimeMillis() - joinStart
                 if (mergeError != null) {
                     cleanUp()
                     status = ExportStatus.FAILED
@@ -581,11 +607,18 @@ fun ExportScreen(
             }
 
             status = ExportStatus.SAVING
+            val saveStart = System.currentTimeMillis()
             val place = withContext(Dispatchers.IO) { saveToMovies(context, fileToSave, savedName) }
+            val saveMs = System.currentTimeMillis() - saveStart
             cleanUp()
             if (place != null) {
                 status = ExportStatus.DONE
                 message = "Saved to: $place$soundNote"
+                timingNote = "Time taken:\n" +
+                    "drawing video: ${durationText(drawMs)}\n" +
+                    (if (voices.isNotEmpty()) "sound ($soundWay): ${durationText(soundMs)}\n" else "") +
+                    (if (voices.isNotEmpty()) "joining: ${durationText(joinMs)}\n" else "") +
+                    "saving to Movies: ${durationText(saveMs)}"
             } else {
                 status = ExportStatus.FAILED
                 message = "The video was made but could not be saved to Movies."
@@ -668,6 +701,16 @@ fun ExportScreen(
                     }
                 }
                 Spacer(modifier = Modifier.height(12.dp))
+
+                // Fade in / fade out of the whole video (picture and sound).
+                SceneFadesPanel(totalMs)
+                Text(
+                    text = "Fades make the sound step slower: the voiceover must be re-encoded. With fades Off the sound is copied as it is and this step is quick.",
+                    color = ExWarn,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+                Spacer(modifier = Modifier.height(12.dp))
             }
 
             val infoShape = RoundedCornerShape(14.dp)
@@ -730,7 +773,7 @@ fun ExportScreen(
                     modifier = Modifier.padding(top = 4.dp)
                 )
                 Text(
-                    text = "Export build: Step 71",
+                    text = "Export build: Step 72",
                     color = Color(0xFF6C85B8),
                     fontSize = 11.sp,
                     modifier = Modifier.padding(top = 6.dp)
