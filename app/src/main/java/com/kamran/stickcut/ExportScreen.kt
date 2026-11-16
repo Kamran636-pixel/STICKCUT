@@ -69,6 +69,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 private val ExNavy = Color(0xFF050B1F)
 private val ExBlue = Color(0xFF2D8CFF)
@@ -91,6 +92,13 @@ private val resolutionOptions = listOf(
 )
 
 private val fpsOptions = listOf(24, 30, 60, 90)
+
+// The time of the FIRST frame the exporter gave to each picture's movement.
+// It shows whether the exporter counts time from 0 for every picture
+// or from the start of the whole video.
+object ExportDebug {
+    val firstFrameMs = ConcurrentHashMap<Int, Long>()
+}
 
 // Writes an error as: full class name, message, and the first lines of the stack.
 // It follows the "caused by" chain, so a hidden cause is never lost.
@@ -188,6 +196,7 @@ private fun buildComposition(
         Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP
     )
     val planned = AnimationEngine.plan(scenes, settings)
+    ExportDebug.firstFrameMs.clear()
 
     val imageItems = scenes.mapIndexed { position, scene ->
         val mediaItem = MediaItem.Builder()
@@ -199,9 +208,18 @@ private fun buildComposition(
         val plan = planned.getOrNull(position)
         if (plan != null && plan.config.type != AnimationType.NONE) {
             val durationMs = scene.durationMs
+            val sceneNumber = position + 1
+            // The exporter may count time from 0 for every picture, or from the
+            // start of the whole video. Either way the FIRST frame of this
+            // picture is the start of its movement.
+            var firstUs = -1L
             effects.add(
                 MatrixTransformation { presentationTimeUs ->
-                    val localMs = (presentationTimeUs / 1000L).coerceIn(0L, durationMs)
+                    if (firstUs < 0L) {
+                        firstUs = presentationTimeUs
+                        ExportDebug.firstFrameMs[sceneNumber] = presentationTimeUs / 1000L
+                    }
+                    val localMs = ((presentationTimeUs - firstUs) / 1000L).coerceIn(0L, durationMs)
                     val t = AnimationEngine.transformAtTime(plan.config, plan, localMs)
                     val matrix = Matrix()
                     // Picture zooms around its centre, then moves.
@@ -214,8 +232,7 @@ private fun buildComposition(
         }
 
         // Media3 1.4.1 needs BOTH the picture's duration and its frame rate
-        // set on the EditedMediaItem. Without the duration it throws an
-        // IllegalStateException inside ImageAssetLoader.
+        // set on the EditedMediaItem.
         EditedMediaItem.Builder(mediaItem)
             .setDurationUs(scene.durationMs * 1000L)
             .setFrameRate(fps)
@@ -279,6 +296,21 @@ private fun animationLine(settings: AnimationSettings): String {
     }
 }
 
+// A short report: when did the first frame of pictures 1, 2 and 3 arrive?
+private fun timingReport(scenes: List<Scene>): String {
+    val lines = mutableListOf<String>()
+    for (number in 1..3) {
+        val first = ExportDebug.firstFrameMs[number] ?: continue
+        val start = scenes.getOrNull(number - 1)?.startMs ?: continue
+        lines.add("picture $number: first frame at $first ms (picture starts at $start ms)")
+    }
+    return if (lines.isEmpty()) {
+        "Timing check: no movement frames were recorded."
+    } else {
+        "Timing check:\n" + lines.joinToString("\n")
+    }
+}
+
 @OptIn(UnstableApi::class)
 @Composable
 fun ExportScreen(
@@ -294,6 +326,7 @@ fun ExportScreen(
     var status by remember { mutableStateOf(ExportStatus.IDLE) }
     var progress by remember { mutableStateOf(0) }
     var message by remember { mutableStateOf<String?>(null) }
+    var timingNote by remember { mutableStateOf<String?>(null) }
     var transformer by remember { mutableStateOf<Transformer?>(null) }
     var resolutionIndex by remember { mutableStateOf(0) }
     var fps by remember { mutableStateOf(30) }
@@ -345,6 +378,7 @@ fun ExportScreen(
     fun startExport() {
         if (running || scenes.isEmpty()) return
         message = null
+        timingNote = null
         progress = 0
         val folder = File(context.cacheDir, "export")
         folder.mkdirs()
@@ -372,6 +406,7 @@ fun ExportScreen(
             override fun onCompleted(composition: Composition, exportResult: ExportResult) {
                 transformer = null
                 progress = 100
+                timingNote = timingReport(scenes)
                 status = ExportStatus.SAVING
                 scope.launch {
                     val place = withContext(Dispatchers.IO) { saveToMovies(context, file, name) }
@@ -549,13 +584,13 @@ fun ExportScreen(
                     )
                 }
                 Text(
-                    text = "Transitions between scenes and captions come in the next steps.",
+                    text = "Not in the exported video yet: scene transitions, scene fades and captions (they work in the preview).",
                     color = ExWarn,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(top = 8.dp)
                 )
                 Text(
-                    text = "Export build: Step 59",
+                    text = "Export build: Step 67",
                     color = Color(0xFF6C85B8),
                     fontSize = 11.sp,
                     modifier = Modifier.padding(top = 6.dp)
@@ -628,6 +663,15 @@ fun ExportScreen(
                     },
                     fontSize = if (status == ExportStatus.FAILED) 12.sp else 14.sp,
                     modifier = Modifier.padding(top = 12.dp)
+                )
+            }
+            val timing = timingNote
+            if (timing != null) {
+                Text(
+                    text = timing,
+                    color = Color(0xFF6C85B8),
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 8.dp)
                 )
             }
         }
