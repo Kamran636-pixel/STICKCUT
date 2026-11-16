@@ -15,7 +15,8 @@ import kotlin.math.max
 // It uses the same maths as the preview screen:
 //   - AnimationEngine for the zoom,
 //   - CutTransitionStore for the transition of every cut,
-//   - SceneFadeStore for the fade in / fade out of the whole video.
+//   - SceneFadeStore for the fade in / fade out of the whole video,
+//   - CaptionStore for the captions (drawn last, on top of everything).
 // The video exporter calls draw() once for every frame.
 class FrameComposer(
     private val context: Context,
@@ -29,6 +30,10 @@ class FrameComposer(
     private val planned = AnimationEngine.plan(scenes, animation)
     private val keys = scenes.map { CutTransitionEngine.sceneKey(it.imageUri) }
     val totalMs: Long = scenes.lastOrNull()?.endMs ?: 0L
+
+    // Captions use the style chosen in Caption Studio. If they are switched off
+    // there, nothing is drawn.
+    private val captions = CaptionCanvas(CaptionStore.style, scenes, width, height)
 
     // Scenes whose picture could not be read. The exporter shows this as an error
     // instead of silently drawing a black frame.
@@ -236,6 +241,9 @@ class FrameComposer(
             )
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), fadePaint)
         }
+
+        // Captions go on top of everything, like in the preview.
+        captions.draw(canvas, timeMs)
     }
 
     // Frees all pictures held in memory.
