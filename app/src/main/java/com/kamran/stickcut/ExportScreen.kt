@@ -2,7 +2,6 @@ package com.kamran.stickcut
 
 import android.content.ContentValues
 import android.content.Context
-import android.graphics.Matrix
 import android.media.MediaCodecList
 import android.net.Uri
 import android.os.Build
@@ -29,7 +28,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,24 +43,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.media3.common.Effect
-import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.effect.MatrixTransformation
-import androidx.media3.effect.Presentation
-import androidx.media3.transformer.Composition
-import androidx.media3.transformer.DefaultEncoderFactory
-import androidx.media3.transformer.EditedMediaItem
-import androidx.media3.transformer.EditedMediaItemSequence
-import androidx.media3.transformer.Effects
-import androidx.media3.transformer.ExportException
-import androidx.media3.transformer.ExportResult
-import androidx.media3.transformer.ProgressHolder
-import androidx.media3.transformer.Transformer
-import androidx.media3.transformer.VideoEncoderSettings
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -94,9 +77,7 @@ private val resolutionOptions = listOf(
 
 private val fpsOptions = listOf(24, 30, 60, 90)
 
-// The time of the FIRST frame the exporter gave to each picture's movement.
-// It shows whether the exporter counts time from 0 for every picture
-// or from the start of the whole video.
+// Kept only so older code that may still name it keeps compiling.
 object ExportDebug {
     val firstFrameMs = ConcurrentHashMap<Int, Long>()
 }
@@ -180,76 +161,6 @@ private fun clampBitrate(bitrate: Int): Int {
     }
 }
 
-// Every picture is shown for exactly its scene time and moves with the same
-// animation maths as the preview. The voiceover parts play back to back.
-@OptIn(UnstableApi::class)
-private fun buildComposition(
-    scenes: List<Scene>,
-    audios: List<ImportedAudio>,
-    settings: AnimationSettings,
-    width: Int,
-    height: Int,
-    fps: Int
-): Composition {
-    val presentation = Presentation.createForWidthAndHeight(
-        width,
-        height,
-        Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP
-    )
-    val planned = AnimationEngine.plan(scenes, settings)
-    ExportDebug.firstFrameMs.clear()
-
-    val imageItems = scenes.mapIndexed { position, scene ->
-        val mediaItem = MediaItem.Builder()
-            .setUri(scene.imageUri)
-            .setImageDurationMs(scene.durationMs)
-            .build()
-
-        val effects = mutableListOf<Effect>(presentation)
-        val plan = planned.getOrNull(position)
-        if (plan != null && plan.config.type != AnimationType.NONE) {
-            val durationMs = scene.durationMs
-            val sceneNumber = position + 1
-            // The exporter may count time from 0 for every picture, or from the
-            // start of the whole video. Either way the FIRST frame of this
-            // picture is the start of its movement.
-            var firstUs = -1L
-            effects.add(
-                MatrixTransformation { presentationTimeUs ->
-                    if (firstUs < 0L) {
-                        firstUs = presentationTimeUs
-                        ExportDebug.firstFrameMs[sceneNumber] = presentationTimeUs / 1000L
-                    }
-                    val localMs = ((presentationTimeUs - firstUs) / 1000L).coerceIn(0L, durationMs)
-                    val t = AnimationEngine.transformAtTime(plan.config, plan, localMs)
-                    val matrix = Matrix()
-                    // Picture zooms around its centre, then moves.
-                    // The screen is 2 units wide and tall (-1..1), y points up.
-                    matrix.postScale(t.scale, t.scale)
-                    matrix.postTranslate(t.offsetX * 2f, -t.offsetY * 2f)
-                    matrix
-                }
-            )
-        }
-
-        // Media3 1.4.1 needs BOTH the picture's duration and its frame rate
-        // set on the EditedMediaItem.
-        EditedMediaItem.Builder(mediaItem)
-            .setDurationUs(scene.durationMs * 1000L)
-            .setFrameRate(fps)
-            .setEffects(Effects(emptyList(), effects))
-            .build()
-    }
-    val sequences = mutableListOf(EditedMediaItemSequence(imageItems))
-    if (audios.isNotEmpty()) {
-        val audioItems = audios.map { audio ->
-            EditedMediaItem.Builder(MediaItem.fromUri(audio.uri)).build()
-        }
-        sequences.add(EditedMediaItemSequence(audioItems))
-    }
-    return Composition.Builder(sequences).build()
-}
-
 // Copies the finished file into the phone's Movies/StickCut folder.
 // Returns a readable place name, or null if copying failed.
 private fun saveToMovies(context: Context, file: File, displayName: String): String? {
@@ -297,21 +208,6 @@ private fun animationLine(settings: AnimationSettings): String {
     }
 }
 
-// A short report: when did the first frame of pictures 1, 2 and 3 arrive?
-private fun timingReport(scenes: List<Scene>): String {
-    val lines = mutableListOf<String>()
-    for (number in 1..3) {
-        val first = ExportDebug.firstFrameMs[number] ?: continue
-        val start = scenes.getOrNull(number - 1)?.startMs ?: continue
-        lines.add("picture $number: first frame at $first ms (picture starts at $start ms)")
-    }
-    return if (lines.isEmpty()) {
-        "Timing check: no movement frames were recorded."
-    } else {
-        "Timing check:\n" + lines.joinToString("\n")
-    }
-}
-
 // 75000 ms -> "1m 15s"
 private fun durationText(ms: Long): String {
     val seconds = ms / 1000L
@@ -337,10 +233,9 @@ fun ExportScreen(
     var stage by remember { mutableStateOf("") }
     var message by remember { mutableStateOf<String?>(null) }
     var timingNote by remember { mutableStateOf<String?>(null) }
-    var transformer by remember { mutableStateOf<Transformer?>(null) }
     var resolutionIndex by remember { mutableStateOf(0) }
     var fps by remember { mutableStateOf(30) }
-    // Set to true to stop the own renderer (the 🧪 button).
+    // Set to true to stop the renderer.
     val renderCancel = remember { AtomicBoolean(false) }
 
     val running = status == ExportStatus.RUNNING || status == ExportStatus.SAVING
@@ -358,128 +253,20 @@ fun ExportScreen(
         onDispose { view.keepScreenOn = false }
     }
 
-    fun cancelExport() {
-        try {
-            transformer?.cancel()
-        } catch (e: Exception) {
-            // ignore
-        }
-        transformer = null
-    }
-
     fun leave() {
         if (status == ExportStatus.RUNNING) {
             renderCancel.set(true)
-            cancelExport()
         }
         onClose()
     }
 
     BackHandler(enabled = true) { leave() }
 
-    LaunchedEffect(status) {
-        if (status != ExportStatus.RUNNING) return@LaunchedEffect
-        val holder = ProgressHolder()
-        while (true) {
-            val t = transformer ?: break
-            val state = t.getProgress(holder)
-            if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
-                progress = holder.progress
-            }
-            delay(300)
-        }
-    }
-
-    fun startExport() {
-        if (running || scenes.isEmpty()) return
-        message = null
-        timingNote = null
-        stage = ""
-        progress = 0
-        val folder = File(context.cacheDir, "export")
-        folder.mkdirs()
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val name = "StickCut_${resolution.label}_${fps}fps_$stamp.mp4"
-        val file = File(folder, name)
-        if (file.exists()) file.delete()
-
-        val composition = try {
-            buildComposition(
-                scenes,
-                audios,
-                AnimationStore.settings,
-                resolution.width,
-                resolution.height,
-                fps
-            )
-        } catch (e: Exception) {
-            status = ExportStatus.FAILED
-            message = "Could not prepare the export (${scenes.size} scenes):\n" + describeError(e)
-            return
-        }
-
-        val listener = object : Transformer.Listener {
-            override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                transformer = null
-                progress = 100
-                timingNote = timingReport(scenes)
-                status = ExportStatus.SAVING
-                scope.launch {
-                    val place = withContext(Dispatchers.IO) { saveToMovies(context, file, name) }
-                    if (place != null) {
-                        status = ExportStatus.DONE
-                        message = "Saved to: $place"
-                    } else {
-                        status = ExportStatus.FAILED
-                        message = "The video was made but could not be saved to Movies."
-                    }
-                }
-            }
-
-            override fun onError(
-                composition: Composition,
-                exportResult: ExportResult,
-                exportException: ExportException
-            ) {
-                transformer = null
-                status = ExportStatus.FAILED
-                message = "Export failed at ${resolution.label} / $fps fps " +
-                    "(code ${exportException.errorCodeName}).\n" +
-                    describeError(exportException)
-            }
-        }
-
-        try {
-            val encoderFactory = DefaultEncoderFactory.Builder(context)
-                .setRequestedVideoEncoderSettings(
-                    VideoEncoderSettings.Builder()
-                        .setBitrate(clampBitrate(bitrate))
-                        .build()
-                )
-                // No silent downgrade: if the phone cannot do it, show a clear error.
-                .setEnableFallback(false)
-                .build()
-            val t = Transformer.Builder(context)
-                .setVideoMimeType(MimeTypes.VIDEO_H264)
-                .setAudioMimeType(MimeTypes.AUDIO_AAC)
-                .setEncoderFactory(encoderFactory)
-                .addListener(listener)
-                .build()
-            transformer = t
-            status = ExportStatus.RUNNING
-            t.start(composition, file.absolutePath)
-        } catch (e: Exception) {
-            transformer = null
-            status = ExportStatus.FAILED
-            message = "Could not start the export (${scenes.size} scenes):\n" + describeError(e)
-        }
-    }
-
-    // The own renderer: draws every frame itself, so transitions and scene
-    // fades really appear in the video. Then the voiceover is joined to the
-    // picture. Without fades the sound is copied as it is (fast); with fades
-    // the sound has to be re-encoded (slower).
-    fun startOwnRender() {
+    // Draws every frame itself, so zoom, transitions, scene fades and captions
+    // really appear in the video. Then the voiceover is joined to the picture.
+    // Without fades the sound is copied as it is (fast); with fades the sound
+    // has to be re-encoded (slower).
+    fun startRender() {
         if (running || scenes.isEmpty()) return
         message = null
         timingNote = null
@@ -488,7 +275,7 @@ fun ExportScreen(
         val folder = File(context.cacheDir, "export")
         folder.mkdirs()
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val name = "StickCut_${resolution.label}_${fps}fps_${stamp}_full.mp4"
+        val name = "StickCut_${resolution.label}_${fps}fps_$stamp.mp4"
         val videoFile = File(folder, "tmp_video_$stamp.mp4")
         val voiceFile = File(folder, "tmp_voice_$stamp.mp4")
         val finalFile = File(folder, name)
@@ -538,7 +325,7 @@ fun ExportScreen(
             if (result.cancelled) {
                 cleanUp()
                 status = ExportStatus.IDLE
-                message = "Render cancelled."
+                message = "Export cancelled."
                 return@launch
             }
             if (!result.ok) {
@@ -571,7 +358,7 @@ fun ExportScreen(
                     if (voiceError == AudioMixer.CANCELLED) {
                         cleanUp()
                         status = ExportStatus.IDLE
-                        message = "Render cancelled."
+                        message = "Export cancelled."
                         return@launch
                     }
                     if (voiceError != null) {
@@ -752,6 +539,12 @@ fun ExportScreen(
                     fontSize = 13.sp,
                     modifier = Modifier.padding(top = 2.dp)
                 )
+                Text(
+                    text = if (CaptionStore.style.enabled) "Captions: on" else "Captions: off (turn them on in Captions)",
+                    color = ExOk,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
                 if (!supported) {
                     Text(
                         text = "⚠ This phone's video encoder does not list this size/frame rate as supported. The export may fail.",
@@ -761,19 +554,13 @@ fun ExportScreen(
                     )
                 }
                 Text(
-                    text = "▶ Start Export: sound and zoom, but no transitions or fades.",
+                    text = "The video includes zoom, transitions, scene fades, captions and sound.",
                     color = ExWarn,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(top = 8.dp)
                 )
                 Text(
-                    text = "🧪 Render: zoom, transitions, scene fades and sound. Captions are not in either yet.",
-                    color = ExWarn,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-                Text(
-                    text = "Export build: Step 72",
+                    text = "Export build: Step 75",
                     color = Color(0xFF6C85B8),
                     fontSize = 11.sp,
                     modifier = Modifier.padding(top = 6.dp)
@@ -800,9 +587,8 @@ fun ExportScreen(
                 Text(
                     text = when {
                         status == ExportStatus.SAVING -> "Saving to your phone..."
-                        stage.isNotEmpty() && stage != "Drawing the video" ->
-                            "$stage...  (keep the app open)"
-                        stage.isNotEmpty() -> "$stage... $progress%  (keep the app open)"
+                        stage == "Drawing the video" -> "$stage... $progress%  (keep the app open)"
+                        stage.isNotEmpty() -> "$stage...  (keep the app open)"
                         else -> "Exporting... $progress%  (keep the app open)"
                     },
                     color = Color.White,
@@ -817,15 +603,7 @@ fun ExportScreen(
                     ExButton(
                         text = "Cancel export",
                         modifier = Modifier.fillMaxWidth(),
-                        onClick = {
-                            val wasTransformer = transformer != null
-                            renderCancel.set(true)
-                            cancelExport()
-                            if (wasTransformer) {
-                                status = ExportStatus.IDLE
-                                message = "Export cancelled."
-                            }
-                        }
+                        onClick = { renderCancel.set(true) }
                     )
                 }
             } else {
@@ -833,17 +611,11 @@ fun ExportScreen(
                     text = when (status) {
                         ExportStatus.DONE -> "Export again"
                         ExportStatus.FAILED -> "Try again"
-                        else -> "▶  Start Export"
+                        else -> "▶  Export Video"
                     },
                     modifier = Modifier.fillMaxWidth(),
                     filled = true,
-                    onClick = { startExport() }
-                )
-                Spacer(modifier = Modifier.height(10.dp))
-                ExButton(
-                    text = "🧪  Render with transitions + sound",
-                    modifier = Modifier.fillMaxWidth(),
-                    onClick = { startOwnRender() }
+                    onClick = { startRender() }
                 )
             }
 
