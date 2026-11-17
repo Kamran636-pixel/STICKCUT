@@ -176,10 +176,8 @@ private fun compareFileNames(a: String, b: String): Int {
     }
 }
 
-// Timestamp names first (by start time), then numbered names, then unknown names.
-// Stable: equal times keep the import order. Nothing is removed.
 private fun sortImages(list: List<ImportedImage>): List<ImportedImage> {
-    return ImageFilenameParser.sortStable(list) { it.name }
+    return list.sortedWith(Comparator { a, b -> compareFileNames(a.name, b.name) })
 }
 
 private fun sortAudios(list: List<ImportedAudio>): List<ImportedAudio> {
@@ -196,10 +194,7 @@ private data class SortReport(
 )
 
 private fun buildReport(names: List<String>): SortReport {
-    return buildReportFromNumbers(names.size, names.mapNotNull { sequenceNumber(it) })
-}
-
-private fun buildReportFromNumbers(total: Int, numbers: List<Long>): SortReport {
+    val numbers = names.mapNotNull { sequenceNumber(it) }
     val duplicates = numbers.groupingBy { it }.eachCount()
         .filter { it.value > 1 }.keys.sorted()
 
@@ -221,67 +216,12 @@ private fun buildReportFromNumbers(total: Int, numbers: List<Long>): SortReport 
         }
     }
     return SortReport(
-        total = total,
+        total = names.size,
         numbered = numbers.size,
-        unnumbered = total - numbers.size,
+        unnumbered = names.size - numbers.size,
         duplicates = duplicates,
         missing = missing,
         missingTotal = missingTotal
-    )
-}
-
-private data class ImageReport(
-    val total: Int,
-    val timestamped: Int,
-    val numbered: Int,
-    val unknown: List<String>,
-    val duplicateTimes: List<String>,
-    val overlaps: Int,
-    val warnings: List<String>,
-    val mixed: Boolean,
-    val numberReport: SortReport
-)
-
-private fun secondsLabel(ms: Long): String {
-    return "${ms / 1000.0}s"
-}
-
-private fun buildImageReport(images: List<ImportedImage>): ImageReport {
-    val parsed = images.map { ImageFilenameParser.parse(it.name) }
-    val timestamped = parsed.count { it.startMs != null }
-    val numbered = parsed.count { it.startMs == null && it.sequenceNumber != null }
-    val unknown = parsed
-        .filter { it.startMs == null && it.sequenceNumber == null }
-        .map { it.original }
-    val duplicateTimes = parsed.mapNotNull { it.startMs }
-        .groupingBy { it }.eachCount()
-        .filter { it.value > 1 }.keys.sorted()
-        .map { secondsLabel(it) }
-
-    val byTime = parsed.filter { it.startMs != null }
-        .sortedBy { it.startMs ?: 0L }
-    var overlaps = 0
-    for (i in 1 until byTime.size) {
-        val previousEnd = byTime[i - 1].endMs
-        val start = byTime[i].startMs ?: 0L
-        if (previousEnd != null && previousEnd > start) overlaps++
-    }
-
-    val warnings = parsed
-        .filter { it.warning != null && it.kind != FilenameKind.UNKNOWN }
-        .map { "${it.original}: ${it.warning}" }
-
-    val numbers = SceneBuilder.imageNumbers(images).filterNotNull()
-    return ImageReport(
-        total = images.size,
-        timestamped = timestamped,
-        numbered = numbered,
-        unknown = unknown,
-        duplicateTimes = duplicateTimes,
-        overlaps = overlaps,
-        warnings = warnings,
-        mixed = timestamped > 0 && numbered > 0,
-        numberReport = buildReportFromNumbers(images.size, numbers)
     )
 }
 
@@ -298,11 +238,6 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
     var audioError by remember { mutableStateOf<String?>(null) }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
     var playingIndex by remember { mutableStateOf<Int?>(null) }
-
-    var scripts by remember { mutableStateOf<List<LoadedScript>>(emptyList()) }
-    var scriptLoading by remember { mutableStateOf(false) }
-    var scriptError by remember { mutableStateOf<String?>(null) }
-    var showPaste by remember { mutableStateOf(false) }
 
     var sceneResult by remember { mutableStateOf<SceneBuildResult?>(null) }
 
@@ -425,61 +360,17 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
         }
     }
 
-    val scriptPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris ->
-        if (uris.isNotEmpty()) {
-            uris.forEach { uri ->
-                try {
-                    context.contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    )
-                } catch (e: Exception) {
-                    // ignore
-                }
-            }
-            scriptError = null
-            scriptLoading = true
-            scope.launch {
-                val existing = scripts.map { it.uri }.toSet()
-                val fresh = uris.filter { it !in existing }
-                val loaded = mutableListOf<LoadedScript>()
-                val failed = mutableListOf<String>()
-                withContext(Dispatchers.IO) {
-                    fresh.forEach { uri ->
-                        val name = queryDisplayName(context, uri)
-                        val text = readScriptText(context, uri)
-                        if (text == null) {
-                            failed.add(name)
-                        } else {
-                            loaded.add(loadScript(name, uri, text))
-                        }
-                    }
-                }
-                scripts = (scripts + loaded).sortedWith(
-                    Comparator { a, b -> compareFileNames(a.name, b.name) }
-                )
-                scriptLoading = false
-                scriptError = if (failed.isEmpty()) {
-                    null
-                } else {
-                    "Could not read: ${failed.joinToString(", ")}. Use plain .txt files smaller than 2 MB."
-                }
-            }
-        }
-    }
-
     val voiceParts = remember(audios) {
         audios.mapIndexed { index, audio ->
             VoicePartInfo(index, sequenceNumber(audio.name), audio.name, audio.durationMs)
         }
     }
     val imageNumberSet = remember(images) {
-        SceneBuilder.imageNumbers(images).filterNotNull().toSet()
+        images.mapNotNull { sequenceNumber(it.name) }.toSet()
     }
-    val scriptMatches = remember(scripts, voiceParts, imageNumberSet) {
-        matchScripts(scripts, voiceParts, imageNumberSet)
+    // Script mode is removed: the app works from the image timestamps only.
+    val scriptMatches = remember(voiceParts, imageNumberSet) {
+        matchScripts(emptyList(), voiceParts, imageNumberSet)
     }
 
     val currentResult = sceneResult
@@ -488,22 +379,6 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
         SceneListScreen(
             result = currentResult,
             onClose = { sceneResult = null }
-        )
-    } else if (showPaste) {
-        PasteScriptScreen(
-            parts = voiceParts,
-            onSave = { name, text ->
-                val pasted = loadScript(
-                    name,
-                    Uri.parse("paste://script/${System.nanoTime()}"),
-                    text
-                )
-                scripts = (scripts + pasted).sortedWith(
-                    Comparator { a, b -> compareFileNames(a.name, b.name) }
-                )
-                showPaste = false
-            },
-            onClose = { showPaste = false }
         )
     } else if (showOrderList) {
         ImageOrderList(
@@ -534,7 +409,7 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text(
-                    text = "Build: Step 56 v2",
+                    text = "Build: Step 76",
                     color = Color(0xFF6C85B8),
                     fontSize = 11.sp,
                     textAlign = TextAlign.Center,
@@ -601,7 +476,11 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                     )
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    ImageReportCard(report = buildImageReport(images))
+                    SortReportCard(
+                        title = "Sort check (images)",
+                        report = buildReport(images.map { it.name }),
+                        unnumberedHint = "Images with no clear number are placed at the end. Use View / Reorder to fix them by hand."
+                    )
                     Spacer(modifier = Modifier.height(10.dp))
 
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -699,61 +578,6 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                     )
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
-                ImportRow(
-                    icon = "📄",
-                    label = if (scripts.isEmpty()) "Import Script (.txt)" else "Add Script File (.txt)",
-                    onClick = { scriptPicker.launch(arrayOf("*/*")) }
-                )
-                Spacer(modifier = Modifier.height(10.dp))
-                ImportRow(
-                    icon = "📋",
-                    label = "Paste Script",
-                    onClick = { showPaste = true }
-                )
-
-                if (scriptLoading) {
-                    Text(
-                        text = "Reading script...",
-                        color = Color(0xFFB8D4FF),
-                        fontSize = 13.sp,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
-                }
-
-                if (scripts.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(10.dp))
-                    ScriptPanel(
-                        matches = scriptMatches,
-                        parts = voiceParts,
-                        onRemove = { index ->
-                            scripts = scripts.filterIndexed { i, _ -> i != index }
-                        },
-                        onClear = {
-                            scripts = emptyList()
-                            scriptError = null
-                        }
-                    )
-                }
-
-                val scriptErrorText = scriptError
-                if (scriptErrorText != null) {
-                    Text(
-                        text = scriptErrorText,
-                        color = WarnColor,
-                        fontSize = 13.sp,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
-                }
-
-                if (scripts.isEmpty() && SceneBuilder.isTimestampOnly(images)) {
-                    Spacer(modifier = Modifier.height(10.dp))
-                    TimestampModeCard(
-                        images = images,
-                        voiceTotalMs = audios.sumOf { it.durationMs }
-                    )
-                }
-
                 Spacer(modifier = Modifier.height(24.dp))
 
                 Box(
@@ -765,11 +589,7 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                         .clickable {
                             stopPlayback()
                             ProjectStore.audios = audios
-                            sceneResult = if (scripts.isEmpty() && SceneBuilder.isTimestampOnly(images)) {
-                                SceneBuilder.buildFromTimestamps(voiceParts, images)
-                            } else {
-                                SceneBuilder.build(scriptMatches, voiceParts, images)
-                            }
+                            sceneResult = SceneBuilder.build(scriptMatches, voiceParts, images)
                         },
                     contentAlignment = Alignment.Center
                 ) {
@@ -962,195 +782,6 @@ private fun AudioListCard(
 }
 
 @Composable
-private fun TimestampModeCard(images: List<ImportedImage>, voiceTotalMs: Long) {
-    val plan = remember(images, voiceTotalMs) {
-        SceneBuilder.planTimestampImages(images, voiceTotalMs)
-    }
-    val planError = plan.error
-    val hasIssue = planError != null || plan.notes.isNotEmpty() || voiceTotalMs <= 0L
-    val shape = RoundedCornerShape(14.dp)
-    val borderColor = if (hasIssue) WarnColor else OkColor
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(shape)
-            .background(ClassicCardDark)
-            .border(1.dp, borderColor.copy(alpha = 0.7f), shape)
-            .padding(12.dp)
-    ) {
-        Text(
-            text = "⏱ Timestamp mode (no script needed)",
-            color = Color.White,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Bold
-        )
-        Text(
-            text = "Images are placed one after another in start-time order. " +
-                "Each image stays on screen for the time written in its file name.",
-            color = Color(0xFFB8D4FF),
-            fontSize = 12.sp,
-            modifier = Modifier.padding(top = 4.dp)
-        )
-        Text(
-            text = "Images total: ${secondsLabel(plan.imagesTotalMs)}  •  Voiceover: " +
-                if (voiceTotalMs > 0L) secondsLabel(voiceTotalMs) else "not imported yet",
-            color = Color.White,
-            fontSize = 13.sp,
-            modifier = Modifier.padding(top = 4.dp)
-        )
-        if (voiceTotalMs <= 0L) {
-            Text(
-                text = "Import the voiceover before Start Auto Edit.",
-                color = WarnColor,
-                fontSize = 13.sp,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-        }
-        if (planError != null) {
-            Text(
-                text = "✖ $planError",
-                color = WarnColor,
-                fontSize = 13.sp,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-        }
-        plan.notes.take(5).forEach { note ->
-            Text(
-                text = "⚠ $note",
-                color = WarnColor,
-                fontSize = 12.sp,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-        }
-        if (!hasIssue) {
-            Text(
-                text = "✓ Image times match the voiceover length",
-                color = OkColor,
-                fontSize = 13.sp,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-        }
-    }
-}
-
-@Composable
-private fun ImageReportCard(report: ImageReport) {
-    val numbers = report.numberReport
-    val hasIssue = report.unknown.isNotEmpty() ||
-        report.duplicateTimes.isNotEmpty() ||
-        report.overlaps > 0 ||
-        report.warnings.isNotEmpty() ||
-        report.mixed ||
-        numbers.duplicates.isNotEmpty() ||
-        numbers.missingTotal > 0
-    val shape = RoundedCornerShape(14.dp)
-    val borderColor = if (hasIssue) WarnColor else ClassicBlue
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(shape)
-            .background(ClassicCardDark)
-            .border(1.dp, borderColor.copy(alpha = 0.7f), shape)
-            .padding(12.dp)
-    ) {
-        Text(
-            text = "Import report (images)",
-            color = Color.White,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Bold
-        )
-        Text(
-            text = "Total: ${report.total}  •  With time: ${report.timestamped}  •  " +
-                "Numbered: ${report.numbered}  •  Unrecognized: ${report.unknown.size}",
-            color = Color(0xFFB8D4FF),
-            fontSize = 13.sp,
-            modifier = Modifier.padding(top = 4.dp)
-        )
-        if (report.timestamped > 0) {
-            Text(
-                text = "Time names: the first number is the start time. The second number is only a hint. " +
-                    "Images are numbered 1, 2, 3... by start time, so \"Image 1\" in the script means the earliest.",
-                color = Color(0xFFB8D4FF),
-                fontSize = 12.sp,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-        }
-        if (report.mixed) {
-            Text(
-                text = "Some names have a time and some only a number. Time images are numbered 1, 2, 3... " +
-                    "by time; numbered images keep their own number. Numbers may clash.",
-                color = WarnColor,
-                fontSize = 13.sp,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-        }
-        if (report.duplicateTimes.isNotEmpty()) {
-            Text(
-                text = "Same start time: ${report.duplicateTimes.take(8).joinToString(", ")} " +
-                    "(kept in import order)",
-                color = WarnColor,
-                fontSize = 13.sp,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-        }
-        if (report.overlaps > 0) {
-            Text(
-                text = "${report.overlaps} image time range(s) overlap the next image.",
-                color = WarnColor,
-                fontSize = 13.sp,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-        }
-        report.warnings.take(5).forEach { warning ->
-            Text(
-                text = "⚠ $warning",
-                color = WarnColor,
-                fontSize = 12.sp,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-        }
-        if (numbers.duplicates.isNotEmpty()) {
-            Text(
-                text = "Duplicate numbers: ${numbers.duplicates.take(8).joinToString(", ")}",
-                color = WarnColor,
-                fontSize = 13.sp,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-        }
-        if (numbers.missingTotal > 0) {
-            val extra = numbers.missingTotal - numbers.missing.size
-            val extraText = if (extra > 0) " (+$extra more)" else ""
-            Text(
-                text = "Missing numbers: ${numbers.missing.joinToString(", ")}$extraText",
-                color = WarnColor,
-                fontSize = 13.sp,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-        }
-        if (report.unknown.isNotEmpty()) {
-            Text(
-                text = "Not recognized (placed at the end): ${report.unknown.take(5).joinToString(", ")}" +
-                    (if (report.unknown.size > 5) " (+${report.unknown.size - 5} more)" else "") +
-                    ". Use View / Reorder to place them by hand.",
-                color = WarnColor,
-                fontSize = 13.sp,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-        }
-        if (!hasIssue && report.total > 0) {
-            Text(
-                text = "✓ All images recognized, order is complete",
-                color = OkColor,
-                fontSize = 13.sp,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-        }
-    }
-}
-
-@Composable
 private fun SortReportCard(
     title: String,
     report: SortReport,
@@ -1248,7 +879,6 @@ private fun ImageOrderList(
 ) {
     val context = LocalContext.current
     BackHandler(enabled = true) { onClose() }
-    val effectiveNumbers = remember(images) { SceneBuilder.imageNumbers(images) }
 
     fun move(from: Int, to: Int) {
         if (to < 0 || to >= images.size) return
@@ -1307,14 +937,7 @@ private fun ImageOrderList(
             ) {
                 itemsIndexed(images, key = { _, item -> item.uri.toString() }) { index, image ->
                     val shape = RoundedCornerShape(14.dp)
-                    val number = effectiveNumbers.getOrNull(index)
-                    val parsedName = ImageFilenameParser.parse(image.name)
-                    val timeText = if (parsedName.startMs != null) {
-                        val endText = if (parsedName.endMs != null) "–${secondsLabel(parsedName.endMs)}" else ""
-                        "  •  ⏱ ${secondsLabel(parsedName.startMs)}$endText"
-                    } else {
-                        ""
-                    }
+                    val number = sequenceNumber(image.name)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1356,7 +979,7 @@ private fun ImageOrderList(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = if (number != null) "No. $number$timeText" else "no clear number",
+                                text = if (number != null) "No. $number" else "no clear number",
                                 color = if (number != null) Color(0xFFB8D4FF) else WarnColor,
                                 fontSize = 11.sp
                             )
