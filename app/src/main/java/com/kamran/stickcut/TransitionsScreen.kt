@@ -365,19 +365,18 @@ fun TransitionsScreen(
                     fontSize = 13.sp,
                     modifier = Modifier.padding(top = 10.dp)
                 )
-                Text(
-                    text = "Preview and export of transitions come in the next steps.",
-                    color = TrWarn,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 6.dp)
-                )
-                Text(
-                    text = "Transitions build: Step 61",
-                    color = Color(0xFF6C85B8),
-                    fontSize = 11.sp,
-                    modifier = Modifier.padding(top = 6.dp)
-                )
             }
+
+            // ---- Scene fades (whole video: picture and voiceover) ----
+            Spacer(modifier = Modifier.height(16.dp))
+            SceneFadesPanel(scenes.lastOrNull()?.endMs ?: 0L)
+
+            Text(
+                text = "Transitions build: Step 78",
+                color = Color(0xFF6C85B8),
+                fontSize = 11.sp,
+                modifier = Modifier.padding(top = 10.dp)
+            )
         }
 
         CreatorBrand(modifier = Modifier.align(Alignment.BottomCenter))
