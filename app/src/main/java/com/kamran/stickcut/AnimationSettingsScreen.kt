@@ -61,7 +61,7 @@ private val AsOk = Color(0xFF6BE3A0)
 // Zoom depth (in percent) <-> the engine's intensity.
 // Zoom In grows the picture by 15% x intensity, so intensity = depth / 15.
 private const val ZOOM_PERCENT_PER_INTENSITY = 15f
-private const val ZOOM_MIN_PERCENT = 8f
+private const val ZOOM_MIN_PERCENT = 2f
 private const val ZOOM_MAX_PERCENT = 20f
 
 private fun secondsLabel(ms: Long): String {
@@ -375,7 +375,7 @@ fun AnimationSettingsScreen(
                     modifier = Modifier.padding(top = 8.dp)
                 )
                 Text(
-                    text = "Zoom panel: Step 63",
+                    text = "Zoom panel: Step 78",
                     color = Color(0xFF6C85B8),
                     fontSize = 11.sp,
                     modifier = Modifier.padding(top = 6.dp)
@@ -545,57 +545,6 @@ fun AnimationSettingsScreen(
                     text = "Reset",
                     modifier = Modifier.weight(1f),
                     onClick = { updateEditing(AnimationConfig()) }
-                )
-            }
-            Spacer(modifier = Modifier.height(18.dp))
-
-            Text(
-                text = "Transition",
-                color = Color.White,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            TransitionType.values().toList().chunked(2).forEach { rowTypes ->
-                Row(
-                    modifier = Modifier.padding(bottom = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    rowTypes.forEach { type ->
-                        AsChip(
-                            text = type.label,
-                            selected = type == settings.transition.type,
-                            modifier = Modifier.weight(1f),
-                            onClick = {
-                                onSettingsChange(
-                                    settings.copy(transition = settings.transition.copy(type = type))
-                                )
-                            }
-                        )
-                    }
-                    if (rowTypes.size == 1) {
-                        Spacer(modifier = Modifier.weight(1f))
-                    }
-                }
-            }
-            if (settings.transition.type != TransitionType.NONE) {
-                AsSliderRow(
-                    label = "Transition length",
-                    valueText = secondsLabel(settings.transition.durationMs),
-                    value = settings.transition.durationMs / 1000f,
-                    range = 0.1f..2.0f,
-                    onChange = {
-                        onSettingsChange(
-                            settings.copy(
-                                transition = settings.transition.copy(durationMs = (it * 1000f).toLong())
-                            )
-                        )
-                    }
-                )
-                Text(
-                    text = "Very short scenes get a shorter transition automatically, so two transitions never overlap.",
-                    color = AsSoft,
-                    fontSize = 12.sp
                 )
             }
             Spacer(modifier = Modifier.height(20.dp))
