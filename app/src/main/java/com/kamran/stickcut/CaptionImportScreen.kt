@@ -59,6 +59,7 @@ import kotlinx.coroutines.withContext
 // ---------------------------------------------------------------------------
 // Step 80: import button and edit screen for caption files (.srt/.vtt/.txt).
 // Step 81.1: Animated (Studio) style choice.
+// Step 81.2: My fonts card.
 // ---------------------------------------------------------------------------
 
 private val ImpNavy = Color(0xFF050B1F)
@@ -363,6 +364,7 @@ fun ImportedCaptionEditScreen(onClose: () -> Unit) {
             }
 
             item { ImpStyleTypeCard() }
+            item { CaptionFontCard() }
             if (ImportedCaptionMode.useStudio) {
                 item { ImpStudioCard() }
             } else {
