@@ -110,10 +110,11 @@ class ImportedCaptionPainter {
 }
 
 // Which kind of imported caption is used.
+// true  = Animated: the Caption Studio style (animation, position, font, size,
+//         colours). This is the default, so Caption Studio settings just work.
 // false = Classic presets (Classic Outline, Boxed, Yellow Classic).
-// true  = Animated: the Caption Studio style (animation, position, font, size).
 object ImportedCaptionMode {
-    var useStudio by mutableStateOf(false)
+    var useStudio by mutableStateOf(true)
 }
 
 // Turns imported captions into the short chunks that the Caption Studio
