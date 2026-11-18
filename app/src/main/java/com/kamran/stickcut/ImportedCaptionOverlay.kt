@@ -6,7 +6,10 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import androidx.compose.foundation.Canvas as ComposeCanvas
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
@@ -96,6 +99,79 @@ class ImportedCaptionPainter {
     }
 }
 
+// Which kind of imported caption is used.
+// false = Classic presets (Classic Outline, Boxed, Yellow Classic).
+// true  = Animated: the Caption Studio style (animation, position, font, size).
+object ImportedCaptionMode {
+    var useStudio by mutableStateOf(false)
+}
+
+// Turns imported captions into the short chunks that the Caption Studio
+// animations know how to draw (a few words at a time).
+object ImportedCaptionChunks {
+
+    private val spaces = Regex("\\s+")
+
+    fun build(cues: List<CaptionCue>, style: CaptionStyle): List<CaptionChunk> {
+        val s = style.normalized()
+        val sorted = cues.sortedBy { it.startMs }
+        val result = ArrayList<CaptionChunk>()
+        for ((i, cue) in sorted.withIndex()) {
+            val nextStart = sorted.getOrNull(i + 1)?.startMs
+            // If the next caption starts before this one ends, the later one wins.
+            val end = if (nextStart != null && nextStart > cue.startMs && nextStart < cue.endMs) {
+                nextStart
+            } else {
+                cue.endMs
+            }
+            if (end <= cue.startMs) continue
+            val words = cue.text.trim().split(spaces).filter { it.isNotEmpty() }
+            if (words.isEmpty()) continue
+
+            val groups = ArrayList<List<String>>()
+            var current = ArrayList<String>()
+            var letters = 0
+            for (word in words) {
+                val withWord = if (current.isEmpty()) word.length else letters + 1 + word.length
+                if (current.isNotEmpty() && (current.size >= s.maxWords || withWord > s.maxChars)) {
+                    groups.add(current)
+                    current = arrayListOf(word)
+                    letters = word.length
+                } else {
+                    current.add(word)
+                    letters = withWord
+                }
+            }
+            if (current.isNotEmpty()) groups.add(current)
+
+            val weights = groups.map { it.joinToString(" ").length.coerceAtLeast(1) }
+            val totalWeight = weights.sum().toLong()
+            val duration = end - cue.startMs
+            var cumulative = 0L
+            var previous = cue.startMs
+            for ((g, group) in groups.withIndex()) {
+                cumulative += weights[g]
+                val boundary = if (g == groups.lastIndex) {
+                    end
+                } else {
+                    cue.startMs + Math.round(duration.toDouble() * cumulative / totalWeight)
+                }
+                result.add(
+                    CaptionChunk(
+                        sceneIndex = cue.id.toInt(),
+                        startMs = previous,
+                        endMs = boundary,
+                        text = group.joinToString(" "),
+                        words = group
+                    )
+                )
+                previous = boundary
+            }
+        }
+        return result
+    }
+}
+
 // Shows the caption of this moment (if any) over the whole frame.
 @Composable
 fun ImportedCaptionOverlay(
@@ -105,8 +181,24 @@ fun ImportedCaptionOverlay(
     modifier: Modifier = Modifier
 ) {
     val painter = remember { ImportedCaptionPainter() }
-    val piece = CaptionWrap.activeAt(pieces, positionMs)
-    if (piece != null) {
+    val studioStyle = CaptionStore.style
+    val studio = ImportedCaptionMode.useStudio
+    val chunks = remember(state.cues, studio, studioStyle.maxWords, studioStyle.maxChars) {
+        if (studio) ImportedCaptionChunks.build(state.cues, studioStyle) else emptyList()
+    }
+    val piece = if (studio) null else CaptionWrap.activeAt(pieces, positionMs)
+
+    if (studio) {
+        val chunk = CaptionEngine.chunkAt(chunks, positionMs)
+        if (chunk != null) {
+            CaptionOverlay(
+                chunk = chunk,
+                style = studioStyle.copy(enabled = true),
+                localMs = positionMs - chunk.startMs,
+                modifier = modifier
+            )
+        }
+    } else if (piece != null) {
         ComposeCanvas(modifier = modifier) {
             drawIntoCanvas { canvas ->
                 painter.draw(
