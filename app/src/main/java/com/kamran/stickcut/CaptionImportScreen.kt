@@ -51,13 +51,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.util.Locale
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 // ---------------------------------------------------------------------------
 // Step 80: import button and edit screen for caption files (.srt/.vtt/.txt).
-// Preview (Step 81) and export (Step 82) come later.
+// Step 81.1: Animated (Studio) style choice.
 // ---------------------------------------------------------------------------
 
 private val ImpNavy = Color(0xFF050B1F)
@@ -221,7 +222,7 @@ fun ImportedCaptionPanel(audioDurationMs: Long, onEdit: () -> Unit) {
         )
         Text(
             text = "Optional. Import .srt, .vtt or .txt with times. " +
-                "Showing them in the preview and in the exported video comes in the next steps.",
+                "They show in the preview. Showing them in the exported video comes in the next step.",
             color = ImpSoft,
             fontSize = 12.sp,
             modifier = Modifier.padding(top = 4.dp)
@@ -361,8 +362,13 @@ fun ImportedCaptionEditScreen(onClose: () -> Unit) {
                 }
             }
 
-            item { ImpLookCard(state) }
-            item { ImpSizeCard(state) }
+            item { ImpStyleTypeCard() }
+            if (ImportedCaptionMode.useStudio) {
+                item { ImpStudioCard() }
+            } else {
+                item { ImpLookCard(state) }
+                item { ImpSizeCard(state) }
+            }
 
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -712,4 +718,160 @@ private fun ImpCueDialog(cue: CaptionCue, onDismiss: () -> Unit) {
             }
         }
     )
+}
+
+// Rows of up to three buttons. The selected one is filled.
+@Composable
+private fun ImpChoiceRows(labels: List<String>, selectedIndex: Int, onSelect: (Int) -> Unit) {
+    labels.chunked(3).forEachIndexed { rowIndex, rowLabels ->
+        Row(
+            modifier = Modifier.padding(bottom = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            rowLabels.forEachIndexed { i, label ->
+                val index = rowIndex * 3 + i
+                ImpButton(
+                    text = label,
+                    modifier = Modifier.weight(1f),
+                    filled = index == selectedIndex,
+                    onClick = { onSelect(index) }
+                )
+            }
+            repeat(3 - rowLabels.size) {
+                Spacer(modifier = Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+@Composable
+private fun ImpStyleTypeCard() {
+    val studio = ImportedCaptionMode.useStudio
+    val shape = RoundedCornerShape(16.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(ImpCardDark)
+            .padding(14.dp)
+    ) {
+        Text(
+            text = "Caption style type",
+            color = Color.White,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ImpButton(
+                text = "Classic presets",
+                modifier = Modifier.weight(1f),
+                filled = !studio,
+                onClick = { ImportedCaptionMode.useStudio = false }
+            )
+            ImpButton(
+                text = "Animated (Studio)",
+                modifier = Modifier.weight(1f),
+                filled = studio,
+                onClick = { ImportedCaptionMode.useStudio = true }
+            )
+        }
+        Text(
+            text = if (studio) {
+                "Animation, position, font and size below are the same settings as Caption Studio."
+            } else {
+                "Classic presets: Classic Outline, Boxed, Yellow Classic. " +
+                    "Choose Animated if you want animation, position and font."
+            },
+            color = ImpSoft,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+    }
+}
+
+// The same style that Caption Studio changes (CaptionStore), so both stay in step.
+@Composable
+private fun ImpStudioCard() {
+    val style = CaptionStore.style
+    val shape = RoundedCornerShape(16.dp)
+    val fonts = CaptionFont.values().filter { it != CaptionFont.CUSTOM }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(ImpCardDark)
+            .padding(14.dp)
+    ) {
+        Text(
+            text = "Animation",
+            color = Color.White,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        val animations = CaptionAnimation.values().toList()
+        ImpChoiceRows(
+            labels = animations.map { it.label },
+            selectedIndex = animations.indexOf(style.animation),
+            onSelect = { CaptionStore.style = CaptionStore.style.copy(animation = animations[it]) }
+        )
+
+        Text(
+            text = "Position",
+            color = Color.White,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
+        )
+        val positions = CaptionPosition.values().toList()
+        ImpChoiceRows(
+            labels = positions.map { it.label },
+            selectedIndex = positions.indexOf(style.position),
+            onSelect = { CaptionStore.style = CaptionStore.style.copy(position = positions[it]) }
+        )
+
+        Text(
+            text = "Font",
+            color = Color.White,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
+        )
+        ImpChoiceRows(
+            labels = fonts.map { it.label },
+            selectedIndex = fonts.indexOf(style.font),
+            onSelect = { CaptionStore.style = CaptionStore.style.copy(font = fonts[it]) }
+        )
+
+        val size = style.sizePercent.coerceIn(CaptionStyle.MIN_SIZE, CaptionStyle.MAX_SIZE)
+        Text(
+            text = String.format(Locale.US, "Text size: %.1f%% of the video height", size),
+            color = ImpSoft,
+            fontSize = 12.sp
+        )
+        Slider(
+            value = size,
+            onValueChange = { CaptionStore.style = CaptionStore.style.copy(sizePercent = it) },
+            valueRange = CaptionStyle.MIN_SIZE..CaptionStyle.MAX_SIZE
+        )
+
+        val words = style.maxWords.coerceIn(1, 8)
+        Text(
+            text = "Words shown together: $words",
+            color = ImpSoft,
+            fontSize = 12.sp
+        )
+        Slider(
+            value = words.toFloat(),
+            onValueChange = { CaptionStore.style = CaptionStore.style.copy(maxWords = it.roundToInt()) },
+            valueRange = 1f..8f,
+            steps = 6
+        )
+        Text(
+            text = "Colours and the background box can still be changed in Caption Studio.",
+            color = ImpSoft,
+            fontSize = 11.sp
+        )
+    }
 }
