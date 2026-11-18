@@ -26,6 +26,7 @@ class ImportedCaptionPainter {
     private val outline = Paint(Paint.ANTI_ALIAS_FLAG)
     private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val rect = RectF()
+    private var currentTypeface: Typeface = Typeface.DEFAULT_BOLD
 
     init {
         fill.typeface = Typeface.DEFAULT_BOLD
@@ -45,6 +46,15 @@ class ImportedCaptionPainter {
     // Draws one caption (already one piece of text) at the bottom of the frame.
     fun draw(canvas: Canvas, width: Int, height: Int, state: ImportedCaptionState, text: String) {
         if (width <= 0 || height <= 0) return
+
+        // The font chosen in "My fonts" (or the normal bold font).
+        val typeface = CaptionFontManager.typefaceFor(CaptionStore.style)
+        if (typeface !== currentTypeface) {
+            currentTypeface = typeface
+            fill.typeface = typeface
+            outline.typeface = typeface
+        }
+
         val fontPx = CaptionLayoutMath.fontPx(height, state)
         val maxChars = CaptionWrap.maxCharsFor(width, fontPx)
         val lines = CaptionWrap.visualLines(text, maxChars)
