@@ -292,6 +292,7 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
 
     var images by remember { mutableStateOf<List<ImportedImage>>(emptyList()) }
     var showOrderList by remember { mutableStateOf(false) }
+    var showCaptionEditor by remember { mutableStateOf(false) }
 
     var audios by remember { mutableStateOf<List<ImportedAudio>>(emptyList()) }
     var audioLoading by remember { mutableStateOf(false) }
@@ -436,6 +437,8 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
             result = currentResult,
             onClose = { sceneResult = null }
         )
+    } else if (showCaptionEditor) {
+        ImportedCaptionEditScreen(onClose = { showCaptionEditor = false })
     } else if (showOrderList) {
         ImageOrderList(
             images = images,
@@ -465,7 +468,7 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text(
-                    text = "Build: Step 77",
+                    text = "Build: Step 80",
                     color = Color(0xFF6C85B8),
                     fontSize = 11.sp,
                     textAlign = TextAlign.Center,
@@ -637,6 +640,12 @@ fun ClassicAutoEditorScreen(onBack: () -> Unit) {
                         voiceTotalMs = audios.sumOf { it.durationMs }
                     )
                 }
+
+                Spacer(modifier = Modifier.height(10.dp))
+                ImportedCaptionPanel(
+                    audioDurationMs = audios.sumOf { it.durationMs },
+                    onEdit = { showCaptionEditor = true }
+                )
 
                 Spacer(modifier = Modifier.height(24.dp))
 
