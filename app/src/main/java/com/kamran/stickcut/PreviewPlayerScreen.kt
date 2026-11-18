@@ -402,6 +402,12 @@ fun PreviewPlayerScreen(
     val currentCutKind = CutTransitionEngine.kindAt(cutState, keys, baseIndex)
     val fadeGain = SceneFadeEngine.gainAt(fadeState, totalMs, positionMs)
 
+    // Captions imported from a .srt/.vtt/.txt file (Step 80). Cut into short pieces once.
+    val imported = ImportedCaptionStore.state
+    val importedPieces = remember(imported.cues) {
+        ImportedCaptionPainter.piecesFor(imported.cues)
+    }
+
     // Captions (Caption Studio settings). Built only when captions are ON.
     val captionStyle = CaptionStore.style
     val captionChunks = remember(
@@ -487,7 +493,8 @@ fun PreviewPlayerScreen(
                     }
                 }
 
-                if (scenes.isNotEmpty() && captionStyle.enabled) {
+                // Old animated captions are hidden while imported captions are showing.
+                if (scenes.isNotEmpty() && captionStyle.enabled && !imported.isActive) {
                     val chunk = CaptionEngine.chunkAt(captionChunks, positionMs)
                     if (chunk != null) {
                         CaptionOverlay(
@@ -497,6 +504,16 @@ fun PreviewPlayerScreen(
                             modifier = Modifier.fillMaxSize()
                         )
                     }
+                }
+
+                // Imported captions: over the pictures and transitions, under the fade.
+                if (scenes.isNotEmpty() && imported.isActive) {
+                    ImportedCaptionOverlay(
+                        state = imported,
+                        pieces = importedPieces,
+                        positionMs = positionMs,
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
 
                 // Scene fades: black over the whole frame at the start and the end.
@@ -530,7 +547,7 @@ fun PreviewPlayerScreen(
                 )
             }
             Text(
-                text = "Preview build: Step 65",
+                text = "Preview build: Step 81",
                 color = Color(0xFF6C85B8),
                 fontSize = 11.sp,
                 modifier = Modifier.padding(top = 4.dp)
@@ -635,7 +652,18 @@ fun PreviewPlayerScreen(
                         .padding(top = 8.dp)
                 )
             }
-            if (captionStyle.enabled && captionChunks.isEmpty()) {
+            if (imported.isActive) {
+                Text(
+                    text = "Captions from file: ON  •  ${imported.cues.size} captions  •  ${imported.look.label}",
+                    color = PvSoft,
+                    fontSize = 12.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                )
+            }
+            if (captionStyle.enabled && captionChunks.isEmpty() && !imported.isActive) {
                 Text(
                     text = "Captions are ON, but no scene has narration text, so there is nothing to show. " +
                         "Captions need a script.",
