@@ -9,22 +9,53 @@ import android.text.SpannableString
 import android.text.Spanned
 import android.text.StaticLayout
 import android.text.TextPaint
+import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
+import android.text.style.UnderlineSpan
 import java.io.File
 
-// Draws the captions on a video frame (used by the exporter).
-// It uses the same maths as the preview: CaptionEngine and CaptionAnimator.
+// Draws the captions on a video frame (used by the exporter). Step 85.
+// It uses the same maths as the preview: CaptionEngine, CaptionAnimator,
+// CaptionHighlight and ImportedCaptionChunks.
+//
+// What is drawn:
+//   - imported captions (.srt/.vtt/.txt) in "Animated" mode: same style as Caption Studio,
+//   - imported captions in "Classic presets" mode: same painter as the preview,
+//   - otherwise the old captions made from the scene texts.
+// The settings are copied when this object is created, so they cannot change
+// in the middle of an export.
 class CaptionCanvas(
     captionStyle: CaptionStyle,
     scenes: List<Scene>,
     private val width: Int,
     private val height: Int
 ) {
-    private val s = captionStyle.normalized()
-    private val chunks: List<CaptionChunk> =
-        if (s.enabled) CaptionEngine.build(scenes, s).chunks else emptyList()
+    private val imported: ImportedCaptionState = ImportedCaptionStore.state
+    private val useImported: Boolean = imported.isActive
+    private val classicMode: Boolean = useImported && !ImportedCaptionMode.useStudio
+    private val highlightMode: CaptionHighlightMode = CaptionHighlightStore.mode
 
-    val enabled: Boolean get() = s.enabled && chunks.isNotEmpty()
+    // Imported captions ignore the old "Captions: ON/OFF" button, like the preview.
+    private val s = if (useImported) {
+        captionStyle.normalized().copy(enabled = true)
+    } else {
+        captionStyle.normalized()
+    }
+
+    private val chunks: List<CaptionChunk> = when {
+        classicMode -> emptyList()
+        useImported -> ImportedCaptionChunks.build(imported.cues, s)
+        s.enabled -> CaptionEngine.build(scenes, s).chunks
+        else -> emptyList()
+    }
+
+    private val pieces: List<CaptionCue> =
+        if (classicMode) ImportedCaptionPainter.piecesFor(imported.cues) else emptyList()
+    private val classicPainter: ImportedCaptionPainter? =
+        if (classicMode) ImportedCaptionPainter() else null
+
+    val enabled: Boolean
+        get() = if (classicMode) pieces.isNotEmpty() else s.enabled && chunks.isNotEmpty()
 
     private val textSizePx = height * s.sizePercent / 100f
     private val outlinePx = textSizePx * s.outlineWidth * 2f
@@ -83,10 +114,81 @@ class CaptionCanvas(
             .build()
     }
 
+    // Colours the words the same way as the preview (CaptionOverlay).
+    private fun highlightedText(shown: String, words: List<String>, activeIndex: Int): CharSequence {
+        val effectiveMode = if (highlightMode != CaptionHighlightMode.OFF) {
+            highlightMode
+        } else {
+            CaptionHighlightMode.COLOR
+        }
+        val highlight = s.highlightColor.toInt()
+        val spannable = SpannableString(shown)
+        var start = 0
+        words.forEachIndexed { index, word ->
+            val end = start + word.length
+            if (end <= spannable.length) {
+                val isActive = index == activeIndex
+                when (effectiveMode) {
+                    CaptionHighlightMode.PROGRESSIVE -> {
+                        if (index <= activeIndex) {
+                            spannable.setSpan(
+                                ForegroundColorSpan(highlight), start, end,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                            )
+                        }
+                    }
+                    CaptionHighlightMode.BACKGROUND -> {
+                        if (isActive) {
+                            spannable.setSpan(
+                                BackgroundColorSpan(highlight), start, end,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                            )
+                            spannable.setSpan(
+                                ForegroundColorSpan(android.graphics.Color.BLACK), start, end,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                            )
+                        }
+                    }
+                    CaptionHighlightMode.UNDERLINE -> {
+                        if (isActive) {
+                            spannable.setSpan(
+                                ForegroundColorSpan(highlight), start, end,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                            )
+                            spannable.setSpan(
+                                UnderlineSpan(), start, end,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                            )
+                        }
+                    }
+                    else -> {
+                        if (isActive) {
+                            spannable.setSpan(
+                                ForegroundColorSpan(highlight), start, end,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                            )
+                        }
+                    }
+                }
+            }
+            start = end + 1
+        }
+        return spannable
+    }
+
     fun draw(canvas: Canvas, timeMs: Long) {
         if (!enabled) return
+
+        // Classic presets (same painter as the preview).
+        if (classicMode) {
+            val piece = CaptionWrap.activeAt(pieces, timeMs) ?: return
+            classicPainter?.draw(canvas, width, height, imported, piece.text)
+            return
+        }
+
         val chunk = CaptionEngine.chunkAt(chunks, timeMs) ?: return
-        val frame = CaptionAnimator.frameAt(chunk, s, timeMs - chunk.startMs)
+        val localMs = timeMs - chunk.startMs
+        val frame = CaptionAnimator.frameAt(chunk, s, localMs)
         if (frame.alpha <= 0.001f) return
 
         val words = chunk.words.map { CaptionEngine.displayText(it, s) }
@@ -102,25 +204,22 @@ class CaptionCanvas(
         if (s.background) layoutWidth -= (boxPad * 3f).toInt()
         if (layoutWidth < 50) layoutWidth = 50
 
-        val activeWord = if (s.animation == CaptionAnimation.WORD_POP) frame.activeWord else -1
-        val key = "$shown|$activeWord"
+        // Same rule as the preview: the Word highlight setting works with any
+        // animation except Typewriter. If it is Off, Word Pop keeps its yellow word.
+        val useHighlight = s.animation != CaptionAnimation.TYPEWRITER &&
+            (highlightMode != CaptionHighlightMode.OFF || s.animation == CaptionAnimation.WORD_POP)
+        val activeIndex = if (!useHighlight) {
+            -1
+        } else if (highlightMode != CaptionHighlightMode.OFF) {
+            CaptionHighlight.activeWord(chunk.words, localMs, chunk.durationMs)
+        } else {
+            frame.activeWord
+        }
+
+        val key = "$shown|$useHighlight|$activeIndex"
         if (key != cachedKey || cachedFill == null || cachedStroke == null) {
-            val fillText: CharSequence = if (activeWord >= 0) {
-                val spannable = SpannableString(shown)
-                var start = 0
-                words.forEachIndexed { index, word ->
-                    val end = start + word.length
-                    if (index == activeWord && end <= spannable.length) {
-                        spannable.setSpan(
-                            ForegroundColorSpan(s.highlightColor.toInt()),
-                            start,
-                            end,
-                            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-                        )
-                    }
-                    start = end + 1
-                }
-                spannable
+            val fillText: CharSequence = if (useHighlight) {
+                highlightedText(shown, words, activeIndex)
             } else {
                 shown
             }
