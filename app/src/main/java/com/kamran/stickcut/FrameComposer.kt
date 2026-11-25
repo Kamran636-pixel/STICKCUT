@@ -15,8 +15,10 @@ import kotlin.math.max
 // It uses the same maths as the preview screen:
 //   - AnimationEngine for the zoom,
 //   - CutTransitionStore for the transition of every cut,
-//   - SceneFadeStore for the fade in / fade out of the whole video,
-//   - CaptionStore for the captions (drawn last, on top of everything).
+//   - CaptionCanvas for the captions (imported captions or Caption Studio),
+//   - SceneFadeStore for the fade in / fade out of the whole video.
+// Order of drawing (Step 85): pictures + transitions, then captions, then the
+// black fade on top, exactly like the preview.
 // The video exporter calls draw() once for every frame.
 class FrameComposer(
     private val context: Context,
@@ -31,8 +33,8 @@ class FrameComposer(
     private val keys = scenes.map { CutTransitionEngine.sceneKey(it.imageUri) }
     val totalMs: Long = scenes.lastOrNull()?.endMs ?: 0L
 
-    // Captions use the style chosen in Caption Studio. If they are switched off
-    // there, nothing is drawn.
+    // Captions use the settings chosen in Caption Studio (and the imported caption
+    // file, if there is one). They are read once when the export starts.
     private val captions = CaptionCanvas(CaptionStore.style, scenes, width, height)
 
     // Scenes whose picture could not be read. The exporter shows this as an error
@@ -233,6 +235,10 @@ class FrameComposer(
             drawLayer(canvas, index, timeMs, layerFor(role, index == base, blend))
         }
 
+        // Captions are drawn before the black fade, like in the preview, so they
+        // fade out together with the picture.
+        captions.draw(canvas, timeMs)
+
         // Scene fades: black over the whole frame at the start and at the end.
         val gain = SceneFadeEngine.gainAt(fades, totalMs.coerceAtLeast(1L), timeMs)
         if (gain < 1f) {
@@ -241,9 +247,6 @@ class FrameComposer(
             )
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), fadePaint)
         }
-
-        // Captions go on top of everything, like in the preview.
-        captions.draw(canvas, timeMs)
     }
 
     // Frees all pictures held in memory.
