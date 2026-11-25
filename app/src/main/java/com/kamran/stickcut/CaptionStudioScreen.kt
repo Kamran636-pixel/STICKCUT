@@ -56,7 +56,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import java.io.File
 
-// Caption Studio build: Step 83 (word highlight + white/yellow presets)
+// Caption Studio build: Step 84 (template library, undo/redo)
 
 private val CsNavy = Color(0xFF050B1F)
 private val CsBlue = Color(0xFF2D8CFF)
@@ -105,11 +105,11 @@ fun CaptionOverlay(
     chunk: CaptionChunk,
     style: CaptionStyle,
     localMs: Long,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    highlightMode: CaptionHighlightMode = CaptionHighlightStore.mode
 ) {
     val frame = CaptionAnimator.frameAt(chunk, style, localMs)
     val density = LocalDensity.current
-    val highlightMode = CaptionHighlightStore.mode
 
     BoxWithConstraints(modifier = modifier) {
         val frameHeightPx = with(density) { maxHeight.toPx() }
@@ -130,7 +130,7 @@ fun CaptionOverlay(
         val fillColor = Color(style.textColor)
         val highlight = Color(style.highlightColor)
 
-        // Word highlight. The new "Word highlight" setting works with any animation.
+        // Word highlight. The "Word highlight" setting works with any animation.
         // If it is Off, Word Pop keeps its old yellow-word behaviour.
         val useHighlight = style.animation != CaptionAnimation.TYPEWRITER &&
             (highlightMode != CaptionHighlightMode.OFF || style.animation == CaptionAnimation.WORD_POP)
@@ -423,6 +423,7 @@ fun CaptionStudioScreen(
 
     val style = CaptionStore.style
     fun update(newStyle: CaptionStyle) {
+        CaptionHistory.record()
         CaptionStore.style = newStyle.normalized()
     }
 
@@ -526,7 +527,22 @@ fun CaptionStudioScreen(
                 useImported = useImported,
                 style = style
             )
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CsChip(
+                    text = "↶ Undo (${CaptionHistory.undoCount})",
+                    selected = false,
+                    modifier = Modifier.weight(1f),
+                    onClick = { CaptionHistory.undo() }
+                )
+                CsChip(
+                    text = "↷ Redo (${CaptionHistory.redoCount})",
+                    selected = false,
+                    modifier = Modifier.weight(1f),
+                    onClick = { CaptionHistory.redo() }
+                )
+            }
 
             if (hasImportedCues) {
                 CsTitle("Caption type (imported captions)")
@@ -554,6 +570,8 @@ fun CaptionStudioScreen(
                 }
             }
 
+            CaptionTemplatePanel()
+
             CsTitle("Quick presets")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 CsChip(
@@ -575,7 +593,10 @@ fun CaptionStudioScreen(
                 items = CaptionHighlightMode.values().toList(),
                 label = { it.label },
                 isSelected = { it == highlightMode },
-                onSelect = { CaptionHighlightStore.mode = it }
+                onSelect = {
+                    CaptionHistory.record()
+                    CaptionHighlightStore.mode = it
+                }
             )
             if (highlightMode != CaptionHighlightMode.OFF) {
                 Text(
