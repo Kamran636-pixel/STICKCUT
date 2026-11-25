@@ -8,16 +8,19 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
 
 // ---------------------------------------------------------------------------
 // Step 86: keeps the caption settings and the imported captions on the phone.
+// Step 88: the real word times of the captions are kept too.
 //
 // File: stickcut_captions.json (next to the project file).
 // Saved: Caption Studio style, word highlight mode, Animated/Classic choice,
-//        and the imported captions (with your edits and the Classic look).
+//        and the imported captions (with your edits, the word times and the
+//        Classic look).
 //
 // start() is called from ProjectStorage. The first time it runs it brings the
 // saved things back, but only for parts you have not changed yet in this
@@ -94,21 +97,42 @@ object CaptionPersistence {
         return String.format(Locale.US, "%02d:%02d:%02d,%03d", h, m, s, milli)
     }
 
+    private val blankLines = Regex("\\n\\s*\\n")
+
+    private fun oneText(cue: CaptionCue): String = cue.text.replace(blankLines, "\n").trim()
+
+    // The captions that are written to the file: in time order, without empty ones.
+    // The SRT text and the word list use this same list, so their numbers match.
+    private fun exportable(cues: List<CaptionCue>): List<CaptionCue> {
+        return cues.sortedBy { it.startMs }.filter { oneText(it).isNotEmpty() }
+    }
+
     // The captions are stored as normal SRT text, so they come back through
     // the same reader that imported them the first time.
-    private fun toSrt(cues: List<CaptionCue>): String {
-        val blankLines = Regex("\\n\\s*\\n")
+    private fun toSrt(list: List<CaptionCue>): String {
         val sb = StringBuilder()
         var number = 1
-        for (cue in cues.sortedBy { it.startMs }) {
-            val text = cue.text.replace(blankLines, "\n").trim()
-            if (text.isEmpty()) continue
+        for (cue in list) {
             sb.append(number).append('\n')
             sb.append(srtTime(cue.startMs)).append(" --> ").append(srtTime(cue.endMs)).append('\n')
-            sb.append(text).append("\n\n")
+            sb.append(oneText(cue)).append("\n\n")
             number++
         }
         return sb.toString()
+    }
+
+    // Real word times, one list per caption: [[text, startMs, endMs], ...].
+    private fun wordsToJson(list: List<CaptionCue>): JSONArray? {
+        if (list.none { it.words.isNotEmpty() }) return null
+        val all = JSONArray()
+        for (cue in list) {
+            val one = JSONArray()
+            for (w in cue.words) {
+                one.put(JSONArray().put(w.text).put(w.startMs).put(w.endMs))
+            }
+            all.put(one)
+        }
+        return all
     }
 
     private fun write(file: File, snap: CaptionSnap) {
@@ -120,17 +144,20 @@ object CaptionPersistence {
             root.put("useStudio", snap.studio)
 
             val st = snap.imported
-            if (st.cues.isNotEmpty()) {
+            val list = exportable(st.cues)
+            if (list.isNotEmpty()) {
                 val imp = JSONObject()
-                imp.put("fileName", st.fileName ?: "captions")
+                imp.put("fileName", st.fileName)
                 imp.put("enabled", st.enabled)
                 imp.put("look", st.look.name)
                 imp.put("size", st.size.name)
                 val scale = st.customScale
                 if (scale != null) imp.put("customScale", scale.toDouble())
                 imp.put("lineSpacing", CaptionLayoutMath.lineSpacing(st).toDouble())
-                imp.put("cueCount", st.cues.size)
-                imp.put("srt", toSrt(st.cues))
+                imp.put("cueCount", list.size)
+                imp.put("srt", toSrt(list))
+                val words = wordsToJson(list)
+                if (words != null) imp.put("words", words)
                 root.put("imported", imp)
             }
 
@@ -208,14 +235,37 @@ object CaptionPersistence {
         }
     }
 
+    // Puts the saved word times back on their captions. A caption only gets its
+    // words back if the words still spell exactly the caption text.
+    private fun attachWords(cues: List<CaptionCue>, wordsJson: JSONArray?): List<CaptionCue> {
+        if (wordsJson == null || wordsJson.length() != cues.size) return cues
+        return cues.mapIndexed { i, cue ->
+            val one = wordsJson.optJSONArray(i)
+            val list = ArrayList<CaptionWord>()
+            if (one != null) {
+                for (k in 0 until one.length()) {
+                    val w = one.optJSONArray(k) ?: continue
+                    list.add(CaptionWord(w.optString(0, ""), w.optLong(1), w.optLong(2)))
+                }
+            }
+            if (list.isNotEmpty() && list.joinToString(" ") { it.text } == cue.text) {
+                cue.copy(words = list)
+            } else {
+                cue
+            }
+        }
+    }
+
     private fun restoreImported(imp: JSONObject) {
         val parsed = CaptionFileParser.parse(imp.optString("srt", ""), null)
         if (parsed.cues.isEmpty()) {
             CaptionTemplateStore.message = "The saved captions could not be read, so they were not restored."
             return
         }
-        ImportedCaptionStore.load(imp.optString("fileName", "captions"), parsed.cues)
-        ImportedCaptionNotes.format = parsed.format
+        val cues = attachWords(parsed.cues, imp.optJSONArray("words"))
+        ImportedCaptionStore.load(imp.optString("fileName", "captions"), cues)
+        ImportedCaptionNotes.format =
+            if (cues.any { it.words.isNotEmpty() }) "${parsed.format} + word times" else parsed.format
 
         val look = CaptionLook.values().firstOrNull { it.name == imp.optString("look", "") }
         if (look != null) ImportedCaptionStore.setLook(look)
