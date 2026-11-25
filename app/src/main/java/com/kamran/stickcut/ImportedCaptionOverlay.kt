@@ -16,9 +16,9 @@ import androidx.compose.ui.graphics.nativeCanvas
 import kotlin.math.max
 
 // ---------------------------------------------------------------------------
-// Step 81: draws imported captions (from .srt/.vtt/.txt) over the video.
-// The same ImportedCaptionPainter will be used by the exported video (Step 82),
-// so the preview and the MP4 look the same.
+// Draws imported captions (from .srt/.vtt/.txt) over the video.
+// Step 81 / 81.3 / 88. The same ImportedCaptionPainter and ImportedCaptionChunks
+// are used by the exported video, so the preview and the MP4 look the same.
 // ---------------------------------------------------------------------------
 class ImportedCaptionPainter {
 
@@ -110,18 +110,22 @@ class ImportedCaptionPainter {
 }
 
 // Which kind of imported caption is used.
-// true  = Animated: the Caption Studio style (animation, position, font, size,
-//         colours). This is the default, so Caption Studio settings just work.
 // false = Classic presets (Classic Outline, Boxed, Yellow Classic).
+// true  = Animated: the Caption Studio style (animation, position, font, size).
 object ImportedCaptionMode {
     var useStudio by mutableStateOf(true)
 }
 
 // Turns imported captions into the short chunks that the Caption Studio
 // animations know how to draw (a few words at a time).
+// With real word times (Step 88) each chunk starts when its first word starts, and
+// its words carry their real times. Without them the time is shared by letter count.
 object ImportedCaptionChunks {
 
     private val spaces = Regex("\\s+")
+
+    // A pause shorter than this does not make the caption disappear.
+    private const val HOLD_MS = 350L
 
     fun build(cues: List<CaptionCue>, style: CaptionStyle): List<CaptionChunk> {
         val s = style.normalized()
@@ -136,6 +140,15 @@ object ImportedCaptionChunks {
                 cue.endMs
             }
             if (end <= cue.startMs) continue
+
+            // Real word times.
+            val timed = timedChunks(cue, end, s, result.lastOrNull()?.endMs ?: 0L)
+            if (timed != null) {
+                result.addAll(timed)
+                continue
+            }
+
+            // No word times: the time is shared by letter count.
             val words = cue.text.trim().split(spaces).filter { it.isNotEmpty() }
             if (words.isEmpty()) continue
 
@@ -180,6 +193,62 @@ object ImportedCaptionChunks {
             }
         }
         return result
+    }
+
+    // Chunks from real word times. Returns null when the caption has none.
+    private fun timedChunks(
+        cue: CaptionCue,
+        end: Long,
+        s: CaptionStyle,
+        lastEnd: Long
+    ): List<CaptionChunk>? {
+        if (cue.words.isEmpty()) return null
+
+        val groups = ArrayList<List<CaptionWord>>()
+        var current = ArrayList<CaptionWord>()
+        var letters = 0
+        for (w in cue.words) {
+            val withWord = if (current.isEmpty()) w.text.length else letters + 1 + w.text.length
+            if (current.isNotEmpty() && (current.size >= s.maxWords || withWord > s.maxChars)) {
+                groups.add(current)
+                current = arrayListOf(w)
+                letters = w.text.length
+            } else {
+                current.add(w)
+                letters = withWord
+            }
+        }
+        if (current.isNotEmpty()) groups.add(current)
+
+        val out = ArrayList<CaptionChunk>()
+        var floorMs = max(cue.startMs, lastEnd)
+        for ((g, group) in groups.withIndex()) {
+            val gStart = max(group.first().startMs, floorMs)
+            val nextStart = groups.getOrNull(g + 1)?.first()?.startMs
+            val lastWordEnd = group.last().endMs
+            var gEnd = if (nextStart != null) {
+                if (nextStart - lastWordEnd <= HOLD_MS) nextStart else minOf(lastWordEnd + 150L, nextStart)
+            } else {
+                max(lastWordEnd, minOf(end, lastWordEnd + 250L))
+            }
+            gEnd = minOf(gEnd, end)
+            if (gEnd <= gStart) continue
+
+            val texts = group.map { it.text }
+            val starts = group.map { (it.startMs - gStart).coerceAtLeast(0L) }
+            val ends = group.map { (it.endMs - gStart).coerceAtLeast(0L) }
+            out.add(
+                CaptionChunk(
+                    sceneIndex = cue.id.toInt(),
+                    startMs = gStart,
+                    endMs = gEnd,
+                    text = texts.joinToString(" "),
+                    words = TimedWordList(texts, starts, ends)
+                )
+            )
+            floorMs = gEnd
+        }
+        return if (out.isEmpty()) null else out
     }
 }
 
