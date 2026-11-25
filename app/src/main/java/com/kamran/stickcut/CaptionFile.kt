@@ -12,24 +12,40 @@ import kotlin.math.roundToInt
 // ---------------------------------------------------------------------------
 // Caption file import (.srt, .vtt, .txt with times).
 // This is separate from the older per-scene captions (Word Pop, Typewriter...).
+// Step 88: a caption can also carry the REAL time of each word.
 // ---------------------------------------------------------------------------
 
+// One word with its real start and end time (taken from the file).
+data class CaptionWord(
+    val text: String,
+    val startMs: Long,
+    val endMs: Long
+)
+
 // One caption: shown from startMs to endMs.
+// words is empty when the file only had the time of the whole line.
 data class CaptionCue(
     val id: Long,
     val startMs: Long,
     val endMs: Long,
-    val text: String
+    val text: String,
+    val words: List<CaptionWord> = emptyList()
 )
 
 data class CaptionParseResult(
     val cues: List<CaptionCue>,
-    // "SRT", "VTT", "TXT ranges", "TXT inline" or "empty".
+    // "SRT", "VTT", "TXT ranges", "TXT inline", "Word times", or one of the first
+    // two with " + word times", or "empty".
     val format: String,
     val errors: List<String>
 )
 
-private class RawCue(val startMs: Long, val endMs: Long?, val text: String)
+private class RawCue(
+    val startMs: Long,
+    val endMs: Long?,
+    val text: String,
+    val words: List<CaptionWord> = emptyList()
+)
 
 object CaptionFileParser {
 
@@ -41,6 +57,13 @@ object CaptionFileParser {
 
     private const val WORDS_PER_SECOND = 2.5
     private const val MAX_ERRORS = 8
+
+    // Word times: shortest word, and how captions are made from a list of words.
+    private const val MIN_WORD_MS = 40L
+    private const val PAUSE_SPLIT_MS = 700L
+    private const val MAX_WORDS_PER_CUE = 10
+    private const val MAX_CUE_CHARS = 60
+    private const val CUE_HOLD_MS = 250L
 
     // hh:mm:ss.mmm, mm:ss.mmm, with a comma or a period before the milliseconds.
     private const val TIME = "(?:\\d{1,3}:)?\\d{1,2}:\\d{1,2}(?:[.,]\\d{1,3})?"
@@ -60,8 +83,18 @@ object CaptionFileParser {
         "^\\s*(?:\\[\\s*($TIME)\\s*\\]|\\(\\s*($TIME)\\s*\\)|($TIME))\\s*[:\\-\u2013\u2014]?\\s*(.*)$"
     )
 
+    // Word line: "0:01.200 0:01.520 word" or "0:01.200 - 0:01.520 word" (exactly one word).
+    private val wordLineRegex =
+        Regex("^\\s*($TIME)\\s*(?:[-\u2013\u2014]|\\s)\\s*($TIME)\\s+(\\S+)\\s*$")
+
+    // VTT time inside the text: "<00:00:01.500>".
+    private val tagTimeRegex = Regex("<\\s*((?:\\d{1,3}:)?\\d{1,2}:\\d{1,2}(?:[.,]\\d{1,3})?)\\s*>")
+
     private val tagRegex = Regex("<[^>]*>|\\{[^}]*\\}")
     private val spaceRegex = Regex("\\s+")
+
+    // . ! ? and the Bengali full stop, Arabic question mark, ellipsis.
+    private val sentenceEnds = charArrayOf('.', '!', '?', '\u0964', '\u061F', '\u2026')
 
     // "00:00:01,500" -> 1500. Returns null when the time is not valid.
     fun parseTime(token: String): Long? {
@@ -105,6 +138,64 @@ object CaptionFileParser {
         return max(MIN_DURATION_MS, ms)
     }
 
+    // Sorted by start, every word at least MIN_WORD_MS long, and no word runs into the next.
+    private fun sanitizeWords(words: List<CaptionWord>): List<CaptionWord> {
+        val sorted = words.sortedBy { it.startMs }
+        val result = ArrayList<CaptionWord>(sorted.size)
+        for ((i, w) in sorted.withIndex()) {
+            val next = sorted.getOrNull(i + 1)
+            var end = w.endMs
+            if (next != null && end > next.startMs) end = next.startMs
+            if (end <= w.startMs) end = w.startMs + MIN_WORD_MS
+            result.add(CaptionWord(w.text, w.startMs, end))
+        }
+        return result
+    }
+
+    // Several words inside one timed piece share its time by their letters.
+    private fun spreadWords(words: List<String>, start: Long, end: Long, out: MutableList<CaptionWord>) {
+        val span = (end - start).coerceAtLeast(0L)
+        val letters = words.sumOf { it.length.coerceAtLeast(1) }.toLong().coerceAtLeast(1L)
+        var used = 0L
+        var cursor = start
+        for ((i, w) in words.withIndex()) {
+            used += w.length.coerceAtLeast(1)
+            val wEnd = if (i == words.lastIndex) end else start + span * used / letters
+            out.add(CaptionWord(w, cursor, wEnd))
+            cursor = wEnd
+        }
+    }
+
+    // VTT caption text like "word<00:00:01.500> next" -> words with real start times.
+    // Each word ends when the next time tag starts; the last one ends with the caption.
+    private fun wordsFromTagged(body: String, cueStart: Long, cueEnd: Long): List<CaptionWord> {
+        val matches = tagTimeRegex.findAll(body).toList()
+        if (matches.isEmpty()) return emptyList()
+
+        val texts = ArrayList<String>()
+        val starts = ArrayList<Long>()
+        var position = 0
+        var currentStart = cueStart
+        for (m in matches) {
+            texts.add(body.substring(position, m.range.first))
+            starts.add(currentStart)
+            currentStart = parseTime(m.groupValues[1]) ?: currentStart
+            position = m.range.last + 1
+        }
+        texts.add(body.substring(position))
+        starts.add(currentStart)
+
+        val collected = ArrayList<CaptionWord>()
+        for (i in texts.indices) {
+            val words = cleanText(texts[i]).split(' ').filter { it.isNotEmpty() }
+            if (words.isEmpty()) continue
+            val segStart = starts[i]
+            val segEnd = if (i < starts.lastIndex) starts[i + 1] else cueEnd
+            spreadWords(words, segStart, segEnd, collected)
+        }
+        return sanitizeWords(collected)
+    }
+
     // Reads the whole text of a caption file. audioDurationMs is used for the
     // end of the last caption when the file gives no end time.
     fun parse(raw: String, audioDurationMs: Long? = null): CaptionParseResult {
@@ -118,12 +209,17 @@ object CaptionFileParser {
 
         val hasArrow = lines.any { arrowRegex.matches(it) }
         val rangeLines = lines.count { rangeRegex.matches(it) }
+        val wordLines = lines.count { wordLineRegex.matches(it) }
+        val nonBlank = lines.count { it.isNotBlank() }
 
         val format: String
         val raws: List<RawCue>
         if (hasArrow) {
             format = if (firstLine.startsWith("WEBVTT")) "VTT" else "SRT"
             raws = readArrowBlocks(lines, errors)
+        } else if (wordLines >= 3 && wordLines * 10 >= nonBlank * 8) {
+            format = "Word times"
+            raws = readWordLines(lines, errors)
         } else if (rangeLines > 0) {
             format = "TXT ranges"
             raws = readTimedLines(lines, true, errors)
@@ -139,7 +235,9 @@ object CaptionFileParser {
                 "No captions were found. Use .srt, .vtt, or .txt with times like 00:00:01 - 00:00:03."
             )
         }
-        return CaptionParseResult(cues, format, errors)
+        val hasWordTimes = cues.any { it.words.isNotEmpty() }
+        val label = if (hasWordTimes && format != "Word times") "$format + word times" else format
+        return CaptionParseResult(cues, label, errors)
     }
 
     private fun readArrowBlocks(lines: List<String>, errors: MutableList<String>): List<RawCue> {
@@ -168,7 +266,70 @@ object CaptionFileParser {
                 )
                 continue
             }
-            result.add(RawCue(start, end, body.toString()))
+            val bodyText = body.toString()
+            result.add(RawCue(start, end, bodyText, wordsFromTagged(bodyText, start, end)))
+        }
+        return result
+    }
+
+    // One word per line: "0:01.200 0:01.520 word". The words are joined into captions.
+    private fun readWordLines(lines: List<String>, errors: MutableList<String>): List<RawCue> {
+        val words = ArrayList<CaptionWord>()
+        for ((index, line) in lines.withIndex()) {
+            if (line.isBlank()) continue
+            val lineNumber = index + 1
+            val m = wordLineRegex.matchEntire(line)
+            if (m == null) {
+                addError(errors, "Line $lineNumber: skipped (it is not \"start end word\").")
+                continue
+            }
+            val start = parseTime(m.groupValues[1])
+            val end = parseTime(m.groupValues[2])
+            val word = cleanText(m.groupValues[3])
+            if (start == null || end == null) {
+                addError(errors, "Line $lineNumber: cannot read the time in \"${line.trim()}\".")
+                continue
+            }
+            if (word.isEmpty()) continue
+            words.add(CaptionWord(word, start, end))
+        }
+        return groupWordCues(sanitizeWords(words))
+    }
+
+    // Makes captions from a list of timed words (sorted). A new caption starts after
+    // a sentence end, after a long pause, or when the caption gets too long.
+    private fun groupWordCues(words: List<CaptionWord>): List<RawCue> {
+        val groups = ArrayList<List<CaptionWord>>()
+        var current = ArrayList<CaptionWord>()
+        var letters = 0
+        for (w in words) {
+            if (current.isNotEmpty()) {
+                val gap = w.startMs - current.last().endMs
+                val tooLong = current.size >= MAX_WORDS_PER_CUE || letters + 1 + w.text.length > MAX_CUE_CHARS
+                if (gap > PAUSE_SPLIT_MS || tooLong) {
+                    groups.add(current)
+                    current = ArrayList()
+                    letters = 0
+                }
+            }
+            letters = if (current.isEmpty()) w.text.length else letters + 1 + w.text.length
+            current.add(w)
+            if (w.text.last() in sentenceEnds) {
+                groups.add(current)
+                current = ArrayList()
+                letters = 0
+            }
+        }
+        if (current.isNotEmpty()) groups.add(current)
+
+        val result = ArrayList<RawCue>()
+        for ((i, group) in groups.withIndex()) {
+            val start = group.first().startMs
+            val lastEnd = group.last().endMs
+            val nextStart = groups.getOrNull(i + 1)?.first()?.startMs
+            var end = lastEnd + CUE_HOLD_MS
+            if (nextStart != null && end > nextStart) end = max(lastEnd, nextStart)
+            result.add(RawCue(start, end, group.joinToString(" ") { it.text }, group))
         }
         return result
     }
@@ -244,12 +405,16 @@ object CaptionFileParser {
         var shortened = false
         val cleaned = raws.mapNotNull { raw ->
             var text = cleanText(raw.text)
+            var words = raw.words
+            // With word times, the text is exactly the words, so both always match.
+            if (words.isNotEmpty()) text = words.joinToString(" ") { it.text }
             if (text.isEmpty()) return@mapNotNull null
             if (text.length > MAX_TEXT_CHARS) {
                 text = text.take(MAX_TEXT_CHARS).trimEnd()
+                words = emptyList()
                 shortened = true
             }
-            RawCue(raw.startMs, raw.endMs, text)
+            RawCue(raw.startMs, raw.endMs, text, words)
         }.sortedBy { it.startMs }
         if (shortened) {
             addError(errors, "A very long caption was shortened to $MAX_TEXT_CHARS letters.")
@@ -267,7 +432,7 @@ object CaptionFileParser {
             }
             // Never a negative or zero length.
             val end = if (wanted <= start) start + MIN_DURATION_MS else wanted
-            cues.add(CaptionCue((i + 1).toLong(), start, end, raw.text))
+            cues.add(CaptionCue((i + 1).toLong(), start, end, raw.text, raw.words))
         }
         return cues
     }
@@ -545,14 +710,21 @@ object ImportedCaptionStore {
     }
 
     // Changes one caption. The end is always after the start, and the list stays
-    // in time order.
+    // in time order. If the text is changed, its word times are dropped (they would
+    // no longer match the words); if only the time is changed they are kept.
     fun updateCue(id: Long, startMs: Long, endMs: Long, text: String) {
         val start = startMs.coerceAtLeast(0L)
         val end = if (endMs <= start) start + CaptionFileParser.MIN_DURATION_MS else endMs
         val clean = CaptionFileParser.cleanText(text).take(CaptionFileParser.MAX_TEXT_CHARS)
         state = state.copy(
             cues = state.cues
-                .map { if (it.id == id) CaptionCue(id, start, end, clean) else it }
+                .map {
+                    if (it.id == id) {
+                        CaptionCue(id, start, end, clean, if (it.text == clean) it.words else emptyList())
+                    } else {
+                        it
+                    }
+                }
                 .sortedBy { it.startMs }
         )
     }
