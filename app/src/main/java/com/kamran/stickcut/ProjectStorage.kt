@@ -20,6 +20,8 @@ data class SavedProject(
     val sceneFades: SceneFadeState = SceneFadeState()
 )
 
+// Step 86: the caption settings and the imported captions are kept by
+// CaptionPersistence in their own file. ProjectStorage only starts it.
 object ProjectStorage {
 
     private const val FILE_NAME = "stickcut_project.json"
@@ -193,6 +195,8 @@ object ProjectStorage {
         cuts: CutTransitionState = CutTransitionStore.state,
         fades: SceneFadeState = SceneFadeStore.state
     ): Boolean {
+        // Step 86: from now on the caption settings are saved automatically.
+        CaptionPersistence.start(context)
         if (result.scenes.isEmpty()) return false
         return try {
             val scenes = JSONArray()
@@ -256,7 +260,9 @@ object ProjectStorage {
     // Call this away from the main thread because it opens every file once to check it.
     // When every file is still there, the saved transitions and fades are also put
     // back into CutTransitionStore and SceneFadeStore, so the project opens complete.
+    // Step 86: it also brings back the saved caption settings and imported captions.
     fun load(context: Context): SavedProject? {
+        CaptionPersistence.start(context)
         val file = projectFile(context)
         if (!file.exists()) return null
         return try {
