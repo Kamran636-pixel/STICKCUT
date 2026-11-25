@@ -55,6 +55,8 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import java.io.File
 
+// Caption Studio build: Step 82 (live preview with imported captions)
+
 private val CsNavy = Color(0xFF050B1F)
 private val CsBlue = Color(0xFF2D8CFF)
 private val CsCard = Color(0xFF0F2F70)
@@ -196,21 +198,56 @@ fun CaptionOverlay(
     }
 }
 
+private fun csTime(ms: Long): String {
+    val total = (ms / 1000L).coerceAtLeast(0L)
+    return "%d:%02d".format(total / 60L, total % 60L)
+}
+
+// The live preview box. It owns the play clock, so only this part
+// redraws every frame (the long settings list below does not).
 @Composable
-fun CaptionStudioScreen(
+private fun StudioPreview(
     scenes: List<Scene>,
-    onClose: () -> Unit
+    imported: ImportedCaptionState,
+    pieces: List<CaptionCue>,
+    useImported: Boolean,
+    style: CaptionStyle
 ) {
     val context = LocalContext.current
-    BackHandler(enabled = true) { onClose() }
 
-    val style = CaptionStore.style
-    fun update(newStyle: CaptionStyle) {
-        CaptionStore.style = newStyle.normalized()
+    val sortedScenes = remember(scenes) { scenes.sortedBy { it.startMs } }
+    val sampleScene = remember(scenes) { scenes.firstOrNull { it.text.isNotBlank() } }
+
+    val cueStarts = remember(imported.cues) { imported.cues.map { it.startMs }.sorted() }
+    val firstStart = cueStarts.firstOrNull() ?: 0L
+    val totalMs = remember(scenes, imported.cues) {
+        maxOf(
+            scenes.maxOfOrNull { it.endMs } ?: 0L,
+            imported.cues.maxOfOrNull { it.endMs } ?: 0L,
+            1L
+        )
+    }
+    val loopStart = (firstStart - 500L).coerceAtLeast(0L)
+
+    var position by remember(firstStart) {
+        mutableStateOf((firstStart + 300L).coerceAtMost(totalMs))
+    }
+    var playing by remember { mutableStateOf(true) }
+
+    LaunchedEffect(playing, totalMs, loopStart) {
+        if (!playing) return@LaunchedEffect
+        var last = 0L
+        while (true) {
+            val now = withFrameNanos { it }
+            if (last != 0L) {
+                val next = position + (now - last) / 1_000_000L
+                position = if (next >= totalMs) loopStart else next
+            }
+            last = now
+        }
     }
 
-    // The sample uses the first scene that has narration text.
-    val sampleScene = remember(scenes) { scenes.firstOrNull { it.text.isNotBlank() } }
+    // Old sample mode (no imported captions): loop the first scene that has text.
     val sampleChunks = remember(sampleScene, style.maxWords, style.maxChars) {
         if (sampleScene == null) {
             emptyList()
@@ -223,21 +260,143 @@ fun CaptionStudioScreen(
     } else {
         minOf(sampleScene.endMs - sampleScene.startMs, 6000L).coerceAtLeast(1L)
     }
-
-    var clock by remember { mutableStateOf(0L) }
-    LaunchedEffect(Unit) {
-        var last = 0L
-        while (true) {
-            val now = withFrameNanos { it }
-            if (last != 0L) clock += (now - last) / 1_000_000L
-            last = now
-        }
-    }
-    val sampleTime = if (sampleScene == null) 0L else sampleScene.startMs + clock % loopMs
+    val sampleTime = if (sampleScene == null) 0L else sampleScene.startMs + position % loopMs
     val sampleChunk = CaptionEngine.chunkAt(sampleChunks, sampleTime)
 
-    val allChunks = remember(scenes, style.maxWords, style.maxChars) {
-        CaptionEngine.build(scenes, style)
+    val shownScene = if (useImported) {
+        sortedScenes.lastOrNull { it.startMs <= position } ?: sortedScenes.firstOrNull()
+    } else {
+        sampleScene
+    }
+
+    val frameShape = RoundedCornerShape(16.dp)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(16f / 9f)
+            .clip(frameShape)
+            .background(Color.Black)
+            .border(1.dp, CsBlue.copy(alpha = 0.6f), frameShape)
+    ) {
+        if (shownScene == null && !useImported) {
+            Text(
+                text = "No scene has narration text, so there is nothing to caption. Import a caption file in AutoEditor to see it here.",
+                color = CsSoft,
+                fontSize = 13.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(16.dp)
+            )
+        }
+        if (shownScene != null) {
+            val request = remember(shownScene.imageUri) {
+                ImageRequest.Builder(context)
+                    .data(shownScene.imageUri)
+                    .size(900)
+                    .build()
+            }
+            AsyncImage(
+                model = request,
+                contentDescription = shownScene.imageName,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        if (useImported) {
+            ImportedCaptionOverlay(
+                state = imported,
+                pieces = pieces,
+                positionMs = position,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else if (sampleChunk != null) {
+            CaptionOverlay(
+                chunk = sampleChunk,
+                style = style,
+                localMs = sampleTime - sampleChunk.startMs,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+    }
+
+    if (useImported) {
+        Spacer(modifier = Modifier.height(6.dp))
+        CsSlider(
+            value = position.toFloat(),
+            range = 0f..totalMs.toFloat(),
+            steps = 0,
+            onChange = { position = it.toLong() }
+        )
+        Text(
+            text = "${csTime(position)} / ${csTime(totalMs)}" +
+                (shownScene?.let { "   •   scene #${it.index}" } ?: ""),
+            color = CsSoft,
+            fontSize = 12.sp
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CsChip(
+                text = "⏮ Previous",
+                selected = false,
+                modifier = Modifier.weight(1f),
+                onClick = {
+                    val target = cueStarts.lastOrNull { it < position - 600L } ?: cueStarts.firstOrNull()
+                    if (target != null) position = target + 200L
+                }
+            )
+            CsChip(
+                text = if (playing) "⏸ Pause" else "▶ Play",
+                selected = playing,
+                modifier = Modifier.weight(1f),
+                onClick = { playing = !playing }
+            )
+            CsChip(
+                text = "Next ⏭",
+                selected = false,
+                modifier = Modifier.weight(1f),
+                onClick = {
+                    val target = cueStarts.firstOrNull { it > position } ?: cueStarts.firstOrNull()
+                    if (target != null) position = target + 200L
+                }
+            )
+        }
+        Text(
+            text = "Preview of your imported captions. Change the settings below and watch this box.",
+            color = CsSoft,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(top = 6.dp)
+        )
+    } else {
+        Text(
+            text = "Live sample (scene #${sampleScene?.index ?: "-"}). This is how the captions will look.",
+            color = CsSoft,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(top = 6.dp)
+        )
+    }
+}
+
+@Composable
+fun CaptionStudioScreen(
+    scenes: List<Scene>,
+    onClose: () -> Unit
+) {
+    BackHandler(enabled = true) { onClose() }
+
+    val style = CaptionStore.style
+    fun update(newStyle: CaptionStyle) {
+        CaptionStore.style = newStyle.normalized()
+    }
+
+    val imported = ImportedCaptionStore.state
+    val hasImportedCues = imported.cues.isNotEmpty()
+    val useImported = imported.isActive
+    val studioMode = ImportedCaptionMode.useStudio
+    val pieces = remember(imported.cues) { ImportedCaptionPainter.piecesFor(imported.cues) }
+
+    val allChunks = remember(scenes, style.maxWords, style.maxChars, useImported) {
+        if (useImported) null else CaptionEngine.build(scenes, style)
     }
 
     Box(
@@ -284,63 +443,61 @@ fun CaptionStudioScreen(
             }
             Spacer(modifier = Modifier.height(10.dp))
 
-            CsChip(
-                text = if (style.enabled) "Captions: ON  (tap to turn off)" else "Captions: OFF  (tap to turn on)",
-                selected = style.enabled,
-                modifier = Modifier.fillMaxWidth(),
-                onClick = { update(style.copy(enabled = !style.enabled)) }
-            )
+            if (hasImportedCues) {
+                CsChip(
+                    text = if (imported.enabled) {
+                        "Imported captions: ON  (tap to turn off)"
+                    } else {
+                        "Imported captions: OFF  (tap to turn on)"
+                    },
+                    selected = imported.enabled,
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { ImportedCaptionStore.setEnabled(!imported.enabled) }
+                )
+            } else {
+                CsChip(
+                    text = if (style.enabled) "Captions: ON  (tap to turn off)" else "Captions: OFF  (tap to turn on)",
+                    selected = style.enabled,
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { update(style.copy(enabled = !style.enabled)) }
+                )
+            }
             Spacer(modifier = Modifier.height(10.dp))
 
-            val frameShape = RoundedCornerShape(16.dp)
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(16f / 9f)
-                    .clip(frameShape)
-                    .background(Color.Black)
-                    .border(1.dp, CsBlue.copy(alpha = 0.6f), frameShape)
-            ) {
-                if (sampleScene == null) {
-                    Text(
-                        text = "No scene has narration text, so there is nothing to caption.",
-                        color = CsSoft,
-                        fontSize = 13.sp,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .padding(16.dp)
-                    )
-                } else {
-                    val request = remember(sampleScene.imageUri) {
-                        ImageRequest.Builder(context)
-                            .data(sampleScene.imageUri)
-                            .size(900)
-                            .build()
-                    }
-                    AsyncImage(
-                        model = request,
-                        contentDescription = sampleScene.imageName,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                    if (sampleChunk != null) {
-                        CaptionOverlay(
-                            chunk = sampleChunk,
-                            style = style,
-                            localMs = sampleTime - sampleChunk.startMs,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
-                }
-            }
-            Text(
-                text = "Live sample (scene #${sampleScene?.index ?: "-"}). This is how the captions will look.",
-                color = CsSoft,
-                fontSize = 12.sp,
-                modifier = Modifier.padding(top = 6.dp)
+            StudioPreview(
+                scenes = scenes,
+                imported = imported,
+                pieces = pieces,
+                useImported = useImported,
+                style = style
             )
             Spacer(modifier = Modifier.height(12.dp))
+
+            if (hasImportedCues) {
+                CsTitle("Caption type (imported captions)")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    CsChip(
+                        text = "Animated (settings below)",
+                        selected = studioMode,
+                        modifier = Modifier.weight(1f),
+                        onClick = { ImportedCaptionMode.useStudio = true }
+                    )
+                    CsChip(
+                        text = "Classic presets",
+                        selected = !studioMode,
+                        modifier = Modifier.weight(1f),
+                        onClick = { ImportedCaptionMode.useStudio = false }
+                    )
+                }
+                if (!studioMode) {
+                    Text(
+                        text = "Classic presets ignore the settings below. Choose \"Animated\" to use them, or edit the Classic look in AutoEditor → Edit.",
+                        color = CsWarn,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
+            }
 
             CsTitle("Animation")
             ChipGrid(
@@ -432,6 +589,7 @@ fun CaptionStudioScreen(
 
             Spacer(modifier = Modifier.height(14.dp))
             val infoShape = RoundedCornerShape(14.dp)
+            val warnings = allChunks?.warnings ?: emptyList()
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -439,30 +597,51 @@ fun CaptionStudioScreen(
                     .background(CsDark)
                     .border(
                         1.dp,
-                        (if (allChunks.warnings.isEmpty()) CsOk else CsWarn).copy(alpha = 0.7f),
+                        (if (warnings.isEmpty()) CsOk else CsWarn).copy(alpha = 0.7f),
                         infoShape
                     )
                     .padding(12.dp)
             ) {
-                Text(
-                    text = "${allChunks.chunks.size} caption pieces for ${scenes.size} scenes",
-                    color = Color.White,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "Timing inside a scene is shared by letter count, because only the scene times are known.",
-                    color = CsSoft,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-                allChunks.warnings.forEach { warning ->
+                if (useImported) {
                     Text(
-                        text = "⚠ $warning",
-                        color = CsWarn,
+                        text = "${imported.cues.size} captions from your file (${pieces.size} pieces)",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "File: ${imported.fileName ?: ""}",
+                        color = CsSoft,
                         fontSize = 12.sp,
                         modifier = Modifier.padding(top = 4.dp)
                     )
+                    Text(
+                        text = "The file only has the time of each line. Words inside a line share that time by letter count, so word highlights are an estimate.",
+                        color = CsSoft,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                } else {
+                    Text(
+                        text = "${allChunks?.chunks?.size ?: 0} caption pieces for ${scenes.size} scenes",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Timing inside a scene is shared by letter count, because only the scene times are known.",
+                        color = CsSoft,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                    warnings.forEach { warning ->
+                        Text(
+                            text = "⚠ $warning",
+                            color = CsWarn,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
                 }
             }
         }
