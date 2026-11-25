@@ -43,8 +43,8 @@ import org.json.JSONObject
 import java.io.File
 
 // ---------------------------------------------------------------------------
-// Step 84: caption template library (data-driven).
-// A template is plain data. To add one, add one entry to CaptionTemplates.builtIn.
+// Step 84 / 87: caption template library (data-driven).
+// A template is plain data. The list of templates is in CaptionTemplateData.kt.
 // Templates only use the built-in fonts, never your uploaded font.
 // ---------------------------------------------------------------------------
 
@@ -164,82 +164,6 @@ data class CaptionTemplate(
             builtIn = false
         )
     }
-}
-
-object CaptionTemplates {
-
-    val categories: List<String> = listOf(
-        "Trending", "Karaoke", "Minimal", "Bold", "Cinematic", "Documentary", "Podcast"
-    )
-
-    // Batch 1: 12 templates. More come in later steps.
-    val builtIn: List<CaptionTemplate> = listOf(
-        CaptionTemplate(
-            id = "tr_white_yellow", name = "White + Yellow", category = "Trending",
-            highlight = CaptionHighlightMode.COLOR
-        ),
-        CaptionTemplate(
-            id = "tr_white_yellow_box", name = "White + Yellow Box", category = "Trending",
-            outlineWidth = 0f, background = true, backgroundColor = 0xCC000000L,
-            highlight = CaptionHighlightMode.COLOR
-        ),
-        CaptionTemplate(
-            id = "tr_pop_cyan", name = "Pop Cyan", category = "Trending",
-            sizePercent = 6.5f, outlineWidth = 0.14f, highlightColor = 0xFF00E5FFL,
-            animation = CaptionAnimation.POP, maxWords = 2,
-            highlight = CaptionHighlightMode.COLOR
-        ),
-        CaptionTemplate(
-            id = "ka_fill_yellow", name = "Karaoke Fill", category = "Karaoke",
-            sizePercent = 5.5f, maxWords = 5, maxChars = 32,
-            highlight = CaptionHighlightMode.PROGRESSIVE
-        ),
-        CaptionTemplate(
-            id = "ka_pink_box", name = "Karaoke Pink Box", category = "Karaoke",
-            sizePercent = 5.5f, outlineWidth = 0f, background = true,
-            backgroundColor = 0x99000000L, highlightColor = 0xFFFF4081L,
-            maxWords = 5, maxChars = 32, highlight = CaptionHighlightMode.PROGRESSIVE
-        ),
-        CaptionTemplate(
-            id = "mi_clean", name = "Clean White", category = "Minimal",
-            font = CaptionFont.SANS, sizePercent = 4.5f, outlineWidth = 0.06f,
-            animation = CaptionAnimation.FADE, maxWords = 6, maxChars = 36
-        ),
-        CaptionTemplate(
-            id = "mi_soft_box", name = "Soft Box", category = "Minimal",
-            font = CaptionFont.SANS, sizePercent = 5f, outlineWidth = 0f,
-            background = true, backgroundColor = 0x66000000L,
-            animation = CaptionAnimation.FADE, maxWords = 5, maxChars = 32
-        ),
-        CaptionTemplate(
-            id = "bo_impact", name = "Big Impact", category = "Bold",
-            sizePercent = 9f, textColor = 0xFFFFD400L, outlineWidth = 0.2f,
-            position = CaptionPosition.MIDDLE, animation = CaptionAnimation.POP,
-            maxWords = 2, maxChars = 16, uppercase = true
-        ),
-        CaptionTemplate(
-            id = "bo_red_alert", name = "Red Alert", category = "Bold",
-            sizePercent = 7f, outlineWidth = 0f, background = true,
-            backgroundColor = 0xFFFF3B30L, animation = CaptionAnimation.SLIDE_UP
-        ),
-        CaptionTemplate(
-            id = "ci_film_serif", name = "Film Serif", category = "Cinematic",
-            font = CaptionFont.SERIF, sizePercent = 5f, outlineWidth = 0.08f,
-            animation = CaptionAnimation.FADE, maxWords = 6, maxChars = 36
-        ),
-        CaptionTemplate(
-            id = "do_lower_line", name = "Doc Underline", category = "Documentary",
-            font = CaptionFont.CONDENSED, sizePercent = 4.8f, outlineWidth = 0f,
-            background = true, backgroundColor = 0xAA0A1A44L, highlightColor = 0xFF6BE3A0L,
-            animation = CaptionAnimation.SLIDE_UP, maxWords = 5, maxChars = 32,
-            highlight = CaptionHighlightMode.UNDERLINE
-        ),
-        CaptionTemplate(
-            id = "po_mid_block", name = "Podcast Block", category = "Podcast",
-            sizePercent = 6f, outlineWidth = 0.1f, position = CaptionPosition.MIDDLE,
-            maxWords = 4, maxChars = 28, highlight = CaptionHighlightMode.BACKGROUND
-        )
-    )
 }
 
 // Keeps your own templates, favourites and recent list in one small JSON file.
