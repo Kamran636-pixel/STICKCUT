@@ -48,6 +48,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -55,7 +56,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import java.io.File
 
-// Caption Studio build: Step 82 (live preview with imported captions)
+// Caption Studio build: Step 83 (word highlight + white/yellow presets)
 
 private val CsNavy = Color(0xFF050B1F)
 private val CsBlue = Color(0xFF2D8CFF)
@@ -108,6 +109,7 @@ fun CaptionOverlay(
 ) {
     val frame = CaptionAnimator.frameAt(chunk, style, localMs)
     val density = LocalDensity.current
+    val highlightMode = CaptionHighlightStore.mode
 
     BoxWithConstraints(modifier = modifier) {
         val frameHeightPx = with(density) { maxHeight.toPx() }
@@ -127,13 +129,48 @@ fun CaptionOverlay(
 
         val fillColor = Color(style.textColor)
         val highlight = Color(style.highlightColor)
+
+        // Word highlight. The new "Word highlight" setting works with any animation.
+        // If it is Off, Word Pop keeps its old yellow-word behaviour.
+        val useHighlight = style.animation != CaptionAnimation.TYPEWRITER &&
+            (highlightMode != CaptionHighlightMode.OFF || style.animation == CaptionAnimation.WORD_POP)
+        val effectiveMode = if (highlightMode != CaptionHighlightMode.OFF) {
+            highlightMode
+        } else {
+            CaptionHighlightMode.COLOR
+        }
+        val activeIndex = if (!useHighlight) {
+            -1
+        } else if (highlightMode != CaptionHighlightMode.OFF) {
+            CaptionHighlight.activeWord(chunk.words, localMs, chunk.durationMs)
+        } else {
+            frame.activeWord
+        }
+
         val annotated = buildAnnotatedString {
-            if (style.animation == CaptionAnimation.WORD_POP) {
+            if (useHighlight) {
                 displayWords.forEachIndexed { index, word ->
                     if (index > 0) append(" ")
-                    withStyle(SpanStyle(color = if (index == frame.activeWord) highlight else fillColor)) {
-                        append(word)
+                    val isActive = index == activeIndex
+                    val spanStyle = when (effectiveMode) {
+                        CaptionHighlightMode.PROGRESSIVE ->
+                            SpanStyle(color = if (index <= activeIndex) highlight else fillColor)
+                        CaptionHighlightMode.BACKGROUND ->
+                            if (isActive) {
+                                SpanStyle(color = Color.Black, background = highlight)
+                            } else {
+                                SpanStyle(color = fillColor)
+                            }
+                        CaptionHighlightMode.UNDERLINE ->
+                            if (isActive) {
+                                SpanStyle(color = highlight, textDecoration = TextDecoration.Underline)
+                            } else {
+                                SpanStyle(color = fillColor)
+                            }
+                        else ->
+                            SpanStyle(color = if (isActive) highlight else fillColor)
                     }
+                    withStyle(spanStyle) { append(word) }
                 }
             } else {
                 append(shown)
@@ -389,6 +426,24 @@ fun CaptionStudioScreen(
         CaptionStore.style = newStyle.normalized()
     }
 
+    // White text, yellow active word. box = true puts it in a dark rounded box.
+    fun applyWhiteYellow(box: Boolean) {
+        update(
+            style.copy(
+                textColor = 0xFFFFFFFFL,
+                highlightColor = 0xFFFFD400L,
+                outlineColor = 0xFF000000L,
+                outlineWidth = if (box) 0f else 0.12f,
+                background = box,
+                backgroundColor = 0xCC000000L,
+                animation = CaptionAnimation.NONE
+            )
+        )
+        CaptionHighlightStore.mode = CaptionHighlightMode.COLOR
+        ImportedCaptionMode.useStudio = true
+    }
+
+    val highlightMode = CaptionHighlightStore.mode
     val imported = ImportedCaptionStore.state
     val hasImportedCues = imported.cues.isNotEmpty()
     val useImported = imported.isActive
@@ -499,6 +554,37 @@ fun CaptionStudioScreen(
                 }
             }
 
+            CsTitle("Quick presets")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CsChip(
+                    text = "White + Yellow word",
+                    selected = false,
+                    modifier = Modifier.weight(1f),
+                    onClick = { applyWhiteYellow(false) }
+                )
+                CsChip(
+                    text = "White + Yellow + Box",
+                    selected = false,
+                    modifier = Modifier.weight(1f),
+                    onClick = { applyWhiteYellow(true) }
+                )
+            }
+
+            CsTitle("Word highlight")
+            ChipGrid(
+                items = CaptionHighlightMode.values().toList(),
+                label = { it.label },
+                isSelected = { it == highlightMode },
+                onSelect = { CaptionHighlightStore.mode = it }
+            )
+            if (highlightMode != CaptionHighlightMode.OFF) {
+                Text(
+                    text = "The spoken word is an estimate (time shared by letter count), not the real voice timing.",
+                    color = CsWarn,
+                    fontSize = 12.sp
+                )
+            }
+
             CsTitle("Animation")
             ChipGrid(
                 items = CaptionAnimation.values().toList(),
@@ -562,7 +648,7 @@ fun CaptionStudioScreen(
                 selected = style.outlineColor,
                 onSelect = { update(style.copy(outlineColor = it)) }
             )
-            if (style.animation == CaptionAnimation.WORD_POP) {
+            if (highlightMode != CaptionHighlightMode.OFF || style.animation == CaptionAnimation.WORD_POP) {
                 CsTitle("Highlight colour (active word)")
                 Swatches(
                     colors = highlightPalette,
