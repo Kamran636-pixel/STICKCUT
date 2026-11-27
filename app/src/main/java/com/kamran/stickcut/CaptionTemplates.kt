@@ -43,9 +43,10 @@ import org.json.JSONObject
 import java.io.File
 
 // ---------------------------------------------------------------------------
-// Step 84 / 87: caption template library (data-driven).
+// Step 84 / 87 / 89: caption template library (data-driven).
 // A template is plain data. The list of templates is in CaptionTemplateData.kt.
 // Templates only use the built-in fonts, never your uploaded font.
+// Step 89: the Auto captions box is shown at the top of this panel.
 // ---------------------------------------------------------------------------
 
 data class CaptionTemplate(
@@ -372,6 +373,8 @@ fun CaptionTemplatePanel() {
     }
 
     Column(modifier = Modifier.fillMaxWidth()) {
+        AutoCaptionPanel(ProjectStore.audios)
+
         Text(
             text = "Templates (${all.size})",
             color = Color.White,
