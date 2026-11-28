@@ -18,6 +18,17 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: Get whisper.cpp source
+        run: |
+          git clone --depth 1 https://github.com/ggml-org/whisper.cpp app/src/main/cpp/whisper.cpp
+          echo "whisper.cpp commit:"
+          git -C app/src/main/cpp/whisper.cpp rev-parse HEAD
+
+      - name: Install NDK and CMake
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;26.1.10909125" "cmake;3.22.1"
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
