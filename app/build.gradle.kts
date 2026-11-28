@@ -7,6 +7,7 @@ plugins {
 android {
     namespace = "com.kamran.stickcut"
     compileSdk = 34
+    ndkVersion = "26.1.10909125"
 
     defaultConfig {
         applicationId = "com.kamran.stickcut"
@@ -14,6 +15,18 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+
+        ndk {
+            // Only 64-bit phones (almost every phone made in the last years).
+            abiFilters += "arm64-v8a"
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {
