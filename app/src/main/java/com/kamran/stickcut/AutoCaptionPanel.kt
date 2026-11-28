@@ -49,12 +49,12 @@ import java.net.UnknownHostException
 import java.net.URL
 
 // ---------------------------------------------------------------------------
-// Step 89: Auto captions with Groq Whisper (online).
+// Step 89 / 90: Auto captions with Groq Whisper (online, optional).
 // - Your audio is sent ONLY after you tap "Yes, send" in the question box.
 // - The API key is typed by you and kept on this phone only (never in the code).
 // - The answer has the real word times that the Whisper model gives.
 // This first version sends the audio file as it is (maximum 25 MB, free plan).
-// Long audio is cut into parts in a later step.
+// Step 90: the offline engine check box is shown above this one.
 // ---------------------------------------------------------------------------
 
 object AsrKeyStore {
@@ -363,6 +363,8 @@ fun AutoCaptionPanel(audios: List<ImportedAudio>) {
         ImportedCaptionMode.useStudio = true
         info = "${parsed.cues.size} captions are ready. See the preview above."
     }
+
+    OfflineEngineCheck()
 
     val shape = RoundedCornerShape(16.dp)
     Column(
