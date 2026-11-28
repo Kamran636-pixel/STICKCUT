@@ -49,13 +49,114 @@ import java.net.UnknownHostException
 import java.net.URL
 
 // ---------------------------------------------------------------------------
-// Step 89 / 90: Auto captions with Groq Whisper (online, optional).
+// Step 89 / 90.1: Auto captions with Groq Whisper (online, optional) and the
+// offline engine check (Whisper C++, no key). Everything is in this one file.
 // - Your audio is sent ONLY after you tap "Yes, send" in the question box.
 // - The API key is typed by you and kept on this phone only (never in the code).
 // - The answer has the real word times that the Whisper model gives.
 // This first version sends the audio file as it is (maximum 25 MB, free plan).
-// Step 90: the offline engine check box is shown above this one.
 // ---------------------------------------------------------------------------
+
+// Bridge to the offline Whisper engine (C++). For now it can only report
+// whether the engine loaded. Speech recognition comes in a later step.
+// The name of this object is used by the C++ file (stickcut_whisper.cpp).
+object WhisperNative {
+    private var loadError: String? = null
+    private var loaded = false
+
+    // Returns null when all is fine, or a short error text.
+    fun ensureLoaded(): String? {
+        if (loaded) return null
+        loadError?.let { return it }
+        return try {
+            System.loadLibrary("stickcut_whisper")
+            loaded = true
+            null
+        } catch (e: UnsatisfiedLinkError) {
+            val text = "The offline engine could not be loaded: ${e.message}"
+            loadError = text
+            text
+        } catch (e: Exception) {
+            val text = "The offline engine failed: ${e.message}"
+            loadError = text
+            text
+        }
+    }
+
+    external fun systemInfo(): String
+}
+
+@Composable
+fun OfflineEngineCheck() {
+    var result by remember { mutableStateOf<String?>(null) }
+    var ok by remember { mutableStateOf(false) }
+
+    val shape = RoundedCornerShape(16.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 14.dp)
+            .clip(shape)
+            .background(Color(0xFF0A1A44))
+            .border(1.dp, Color(0xFF2D8CFF).copy(alpha = 0.5f), shape)
+            .padding(14.dp)
+    ) {
+        Text(
+            text = "Offline engine (Whisper, no key)",
+            color = Color.White,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            text = "Step 90 test only: checks that the offline engine is inside the app. It cannot make captions yet.",
+            color = Color(0xFFB8D4FF),
+            fontSize = 12.sp,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+        val chipShape = RoundedCornerShape(12.dp)
+        Box(
+            modifier = Modifier
+                .padding(top = 10.dp)
+                .fillMaxWidth()
+                .height(40.dp)
+                .clip(chipShape)
+                .background(Color(0xFF2D8CFF))
+                .border(2.dp, Color.White, chipShape)
+                .clickable {
+                    val error = WhisperNative.ensureLoaded()
+                    if (error != null) {
+                        ok = false
+                        result = error
+                    } else {
+                        try {
+                            result = WhisperNative.systemInfo()
+                            ok = true
+                        } catch (e: UnsatisfiedLinkError) {
+                            ok = false
+                            result = "The engine loaded but the check function was not found: ${e.message}"
+                        }
+                    }
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "Check engine",
+                color = Color.White,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        val text = result
+        if (text != null) {
+            Text(
+                text = (if (ok) "✅ Engine loaded.\n" else "⚠ ") + text,
+                color = if (ok) Color(0xFF6BE3A0) else Color(0xFFFFC857),
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        }
+    }
+}
 
 object AsrKeyStore {
     private const val PREFS = "stickcut_asr"
